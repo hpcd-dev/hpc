@@ -1,0 +1,17 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-types = { workspace = true }
+proto = { path = "../proto" }
+clap = { version = "4.5.46", features = ["derive"] }
+anyhow = "1.0.99"
+
+
+[[bin]]
+name = "hpc"
+path = "src/main.rs"
