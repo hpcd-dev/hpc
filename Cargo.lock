@@ -522,8 +522,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "log",
  "proto",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-types",
 ]
