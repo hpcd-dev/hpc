@@ -80,7 +80,7 @@ impl SessionManager {
     /// Ensure we have a connected & authenticated handle.
     /// Streams any keyboard-interactive MFA prompts to `evt_tx`
     /// and consumes responses from `mfa_rx`.
-    async fn ensure_connected(
+    pub async fn ensure_connected(
         &self,
         evt_tx: &mpsc::Sender<Result<StreamEvent, tonic::Status>>,
         mfa_rx: &mut mpsc::Receiver<MfaAnswer>,
@@ -289,7 +289,7 @@ impl SessionManager {
     }
 
     // Execute command over SSH, retrieving stdout, stderr and exit code as output
-    async fn exec_capture(&self, cmd: &str) -> Result<(Vec<u8>, Vec<u8>, i32)> {
+    pub async fn exec_capture(&self, cmd: &str) -> Result<(Vec<u8>, Vec<u8>, i32)> {
         let mut guard = self.handle.lock().await;
         let handle = guard.as_ref().ok_or_else(|| anyhow!("SSH handle lost"))?;
         let mut chan = handle.channel_open_session().await?;

@@ -1,32 +1,141 @@
 use crate::ssh::SessionManager;
+use crate::ssh::SshParams;
 use crate::ssh::receiver_to_stream;
+use crate::state::db::HostStore;
+use crate::util;
 use proto::agent_server::{Agent, AgentServer};
 use proto::{
-    MfaAnswer, MfaPrompt, PingReply, PingRequest, StreamEvent, SubmitRequest, agent_client,
-    stream_event,
+    AddClusterRequest, MfaAnswer, MfaPrompt, PingReply, PingRequest, StreamEvent, SubmitRequest,
+    agent_client, stream_event,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
+use thiserror::Error as ThisError;
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
+mod managers;
+mod os;
 mod slurm;
-use crate::state::db::HostStore;
 use std::pin::Pin;
 type OutStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, Status>> + Send + Sync + 'static>>;
 
-#[derive(Clone)]
-pub struct AgentSvc {
-    mgr: Arc<SessionManager>,
-    hs: HostStore,
+#[derive(Debug, PartialEq, Eq, ThisError)]
+pub enum AgentSvcError {
+    #[error("unknown hostid")]
+    UnknownHostId,
+
+    #[error("connection to {hostid} (user={username},host={hostname}) failed: {error}")]
+    ConnectionFailed {
+        hostid: String,
+        username: String,
+        hostname: String,
+        error: String,
+    },
+    #[error("network error: {0}")]
+    NetworkError(String),
+
+    #[error("database error: {error}")]
+    DatabaseError { error: String },
 }
 
+#[derive(Clone)]
+pub struct AgentSvc {
+    mgr: Arc<RwLock<HashMap<String, Arc<SessionManager>>>>,
+    hs: HostStore,
+}
 impl AgentSvc {
-    pub fn new(mgr: Arc<SessionManager>, hs: HostStore) -> Self {
-        AgentSvc { mgr: mgr, hs: hs }
+    pub fn new(hs: HostStore) -> Self {
+        let mgr = HashMap::new();
+        let mgr_inner = Arc::new(RwLock::new(mgr));
+        AgentSvc {
+            mgr: mgr_inner,
+            hs: hs,
+        }
+    }
+    /// Test if SessionManager object for hostid exists in the in-memory mapping
+    async fn sessionmanager_exists(&self, hostid: &str) -> bool {
+        return self.mgr.clone().read_owned().await.contains_key(hostid);
+    }
+
+    /// Logic for using SessionManager mapping is the following:
+    /// 1. Check if a session for the given hostid already exists
+    /// 2. If it does - all good, just return it
+    /// 3 If it does not exist - go into the database, and check if connection credentials are known
+    /// 4. If they are known - create connection, add it to mappping, return SessionManager
+    /// 5.If credentials are unknown - return appropriate Error
+    async fn get_sessionmanager(&self, hostid: &str) -> Result<Arc<SessionManager>, AgentSvcError> {
+        if self.sessionmanager_exists(hostid).await {
+            return Ok(self
+                .mgr
+                .clone()
+                .read_owned()
+                .await
+                .get(hostid)
+                .unwrap()
+                .clone());
+        } else {
+            // 1. Check if hostid is known in the database
+            let maybe_hostrecord = match self.hs.get_by_hostid(hostid).await {
+                Ok(v) => v,
+
+                Err(e) => {
+                    return Err(AgentSvcError::DatabaseError {
+                        error: format!("database error: {}", e.to_string()),
+                    });
+                }
+            };
+            let Some(hr) = maybe_hostrecord else {
+                return Err(AgentSvcError::UnknownHostId);
+            };
+            // After some housekeeping is done - we can finally create SessionManager and add it to
+            // the sessionmanager storage
+
+            // TODO: port and identity path should be stored in the database
+            let port = 22;
+            let identity_path = "~/.ssh/id_ed25519".to_string();
+            let connection_addr = match hr.address {
+                crate::state::db::Address::Hostname(hn) => tokio::net::lookup_host((hn.clone(), 0))
+                    .await
+                    .map_err(|e| {
+                        return AgentSvcError::NetworkError(format!(
+                            "failed to lookup address for hostid {0} (hostname={1}): {2}",
+                            hostid,
+                            &hn,
+                            e.to_string()
+                        ));
+                    })?
+                    .map(|v| std::net::SocketAddr::new(v.ip(), 22))
+                    .next()
+                    .ok_or_else(|| {
+                        AgentSvcError::NetworkError(format!(
+                            "could not resolve {0} into a valid address: {}",
+                            &hn
+                        ))
+                    })?,
+                crate::state::db::Address::Ip(addr) => std::net::SocketAddr::new(addr, port),
+            };
+            let ssh_params = SshParams {
+                addr: connection_addr,
+                username: hr.username,
+                identity_path: Some(identity_path),
+                keepalive_secs: 60,
+                ki_submethods: None,
+            };
+            let sm = SessionManager::new(ssh_params);
+            // Since this function returns a SessionManager without any guarantees about
+            // connection, actually connecting to the host should be handled externally.
+            let sm_arc = Arc::new(sm);
+            let mut mgr = self.mgr.clone().write_owned().await;
+            mgr.insert(hostid.to_string(), sm_arc.clone());
+            return Ok(sm_arc);
+        }
     }
     async fn run_command(
         &self,
         command: &str,
+        hostid: &str,
         req: tonic::Request<tonic::Streaming<MfaAnswer>>,
     ) -> Result<tonic::Response<OutStream>, Status> {
         // Outbound stream server -> client
@@ -51,7 +160,26 @@ impl AgentSvc {
         });
 
         // execute command over SSH
-        let mgr = self.mgr.clone();
+
+        // get mgr from mapping
+        let mgr = match self.get_sessionmanager(&hostid).await {
+            Ok(v) => v,
+            Err(e) => match e {
+                AgentSvcError::UnknownHostId => {
+                    return Err(Status::invalid_argument(format!("unknown hostid {hostid}")));
+                }
+
+                AgentSvcError::NetworkError(e) => {
+                    return Err(Status::internal(format!("network error: {e}")));
+                }
+                other_error => {
+                    return Err(Status::internal(format!(
+                        "unexpected error: {}",
+                        other_error.to_string()
+                    )));
+                }
+            },
+        };
         let cmd = command.to_string();
         tokio::spawn(async move {
             if let Err(err) = mgr.exec(&cmd, evt_tx.clone(), mfa_rx).await {
@@ -65,11 +193,47 @@ impl AgentSvc {
         let out: OutStream = Box::pin(receiver_to_stream(evt_rx));
         Ok(tonic::Response::new(out))
     }
+    async fn list_partitions(&self) -> anyhow::Result<Vec<String>> {
+        let res: Vec<String> = Vec::new();
+        Ok(res)
+    }
+}
 
-    async fn submit_full(
+#[tonic::async_trait]
+impl Agent for AgentSvc {
+    type LsStream = OutStream;
+    type SubmitStream = OutStream;
+    type AddClusterStream = OutStream;
+    async fn ping(
+        &self,
+        request: tonic::Request<PingRequest>,
+    ) -> Result<tonic::Response<PingReply>, Status> {
+        let req = request.into_inner();
+        match req.message.trim() {
+            "ping" => {
+                return Ok(tonic::Response::new(PingReply {
+                    message: "pong".into(),
+                }));
+            }
+            m => {
+                return Err(Status::invalid_argument(format!(
+                    "expected message 'ping', got '{}'",
+                    m
+                )));
+            }
+        }
+    }
+    async fn ls(
+        &self,
+        request: tonic::Request<tonic::Streaming<MfaAnswer>>,
+    ) -> Result<tonic::Response<Self::LsStream>, Status> {
+        self.run_command("ls", "winery", request).await
+    }
+
+    async fn submit(
         &self,
         request: tonic::Request<tonic::Streaming<SubmitRequest>>,
-    ) -> Result<tonic::Response<OutStream>, Status> {
+    ) -> Result<tonic::Response<Self::SubmitStream>, Status> {
         log::debug!("submit request initiated");
         // Setting up inbound stream (client -> server) carrying data or MFA answers from client to mfa_tx
         let mut inbound = request.into_inner();
@@ -80,8 +244,8 @@ impl AgentSvc {
             .await
             .map_err(|e| Status::unknown(format!("read error: {e}")))?
             .ok_or_else(|| Status::invalid_argument("stream closed before init"))?;
-        let (local_path, remote_path) = match init.msg {
-            Some(proto::submit_request::Msg::Init(i)) => (i.local_path, i.remote_path),
+        let (local_path, remote_path, hostid) = match init.msg {
+            Some(proto::submit_request::Msg::Init(i)) => (i.local_path, i.remote_path, i.hostid),
             _ => return Err(Status::invalid_argument("first message must be init(path)")),
         };
         log::debug!("transfering data from {} to {}", &local_path, &remote_path);
@@ -99,7 +263,24 @@ impl AgentSvc {
             }
         });
 
-        let mgr = self.mgr.clone();
+        let mgr = match self.get_sessionmanager(&hostid).await {
+            Ok(v) => v,
+            Err(e) => match e {
+                AgentSvcError::UnknownHostId => {
+                    return Err(Status::invalid_argument(format!("unknown hostid {hostid}")));
+                }
+
+                AgentSvcError::NetworkError(e) => {
+                    return Err(Status::internal(format!("network error: {e}")));
+                }
+                other_error => {
+                    return Err(Status::internal(format!(
+                        "unexpected error: {}",
+                        other_error.to_string()
+                    )));
+                }
+            },
+        };
         tokio::spawn(async move {
             //if let Err(err) = mgr.sync_dir(&local_path, evt_tx.clone(), mfa_rx).await {
             if let Err(err) = mgr
@@ -124,47 +305,224 @@ impl AgentSvc {
         let out: OutStream = Box::pin(receiver_to_stream(evt_rx));
         Ok(tonic::Response::new(out))
     }
-    async fn list_partitions(&self) -> anyhow::Result<Vec<String>> {
-        let res: Vec<String> = Vec::new();
-        Ok(res)
-    }
-}
 
-#[tonic::async_trait]
-impl Agent for AgentSvc {
-    type LsStream = OutStream;
-    type SubmitStream = OutStream;
-    async fn ping(
+    /// 1. Test if cluster already exists; if it does - return error indicating that cluster exists
+    /// 2. If cluster doesn't exist - create corresponding SessionManager, try to connect and gather
+    ///    information
+    /// 3. If managed to connect and gather the appropriate information - add it to the database and
+    ///    return OK; otherwise - return appropriate error
+    async fn add_cluster(
         &self,
-        request: tonic::Request<PingRequest>,
-    ) -> Result<tonic::Response<PingReply>, Status> {
-        let req = request.into_inner();
-        match req.message.trim() {
-            "ping" => {
-                return Ok(tonic::Response::new(PingReply {
-                    message: "pong".into(),
-                }));
-            }
-            m => {
-                return Err(Status::invalid_argument(format!(
-                    "expected message 'ping', got '{}'",
-                    m
-                )));
-            }
-        }
-    }
-    async fn ls(
-        &self,
-        request: tonic::Request<tonic::Streaming<MfaAnswer>>,
-    ) -> Result<tonic::Response<Self::LsStream>, Status> {
-        self.run_command("ls", request).await
-    }
+        request: tonic::Request<tonic::Streaming<AddClusterRequest>>,
+    ) -> Result<tonic::Response<Self::AddClusterStream>, Status> {
+        log::debug!("adding cluster");
 
-    async fn submit(
-        &self,
-        request: tonic::Request<tonic::Streaming<SubmitRequest>>,
-    ) -> Result<tonic::Response<Self::SubmitStream>, Status> {
-        self.submit_full(request).await
+        let mut inbound = request.into_inner();
+
+        // Spawning a thread to handle the incoming data
+        let init = inbound
+            .message()
+            .await
+            .map_err(|e| Status::unknown(format!("read error: {e}")))?
+            .ok_or_else(|| Status::invalid_argument("stream closed before init"))?;
+        let (username, hostname, hostid) = match init.msg {
+            Some(proto::add_cluster_request::Msg::Init(i)) => (i.username, i.hostname, i.hostid),
+            _ => {
+                return Err(Status::invalid_argument(
+                    "first message must be init(username, hostname, hostid)",
+                ));
+            }
+        };
+
+        log::debug!(
+            "adding cluster (hostid={},username={},hostname={})",
+            &hostid,
+            &username,
+            &hostname
+        );
+        let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
+
+        // Pipe the remaining client messages (if any) into MFA answers
+        let (mfa_tx, mut mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(16);
+        tokio::spawn(async move {
+            while let Ok(Some(item)) = inbound.message().await {
+                if let Some(proto::add_cluster_request::Msg::Mfa(ans)) = item.msg {
+                    if mfa_tx.send(ans).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let port = 22;
+        let identity_path = "~/.ssh/id_ed25519";
+
+        let connection_addr = match util::net::lookup_first_addr(&hostname, port).await {
+            Ok(v) => v,
+            Err(e) => match e {
+                util::net::NetError::DnsNotFound(h) => {
+                    return Err(Status::invalid_argument(format!(
+                        "hostname {hostname} could not be resolved"
+                    )));
+                }
+                util::net::NetError::NoAddrs(h) => {
+                    return Err(Status::invalid_argument(format!(
+                        "couldn't find any IP addresses for {hostname}"
+                    )));
+                }
+                util::net::NetError::Resolve(h) => {
+                    return Err(Status::internal(format!(
+                        "encountered error when resolving {hostname}: {}",
+                        h.to_string()
+                    )));
+                }
+            },
+        };
+        let ssh_params = SshParams {
+            username: username.to_string(),
+            addr: connection_addr,
+            identity_path: Some(identity_path.to_string()),
+            keepalive_secs: 60,
+            ki_submethods: None,
+        };
+
+        tokio::spawn(async move {
+            let sm = SessionManager::new(ssh_params);
+            if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
+                let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to connect to {hostid}: {}",
+                        e.to_string()
+                    ))))
+                    .await;
+                return;
+            };
+            let (out, err, code) = match sm
+                .exec_capture(managers::DETERMINE_HPC_WORKLOAD_MANAGERS_CMD)
+                .await
+            {
+                Ok((vo, ve, ec)) => (vo, ve, ec),
+                Err(e) => {
+                    let _ = evt_tx
+                        .send(Err(Status::aborted(format!(
+                            "failed to gather cluster metadata for {hostid}: {}",
+                            e.to_string()
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+
+            if code != 0 {
+                let err_message =
+                    String::from_utf8(err).unwrap_or("<error message could not be decoded>".into());
+                let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to gather cluster metadata for {hostid}: remote command returned non-zero exit code {}, and error message : {}",
+                        code,
+                        err_message
+                    ))))
+                    .await;
+                return;
+            }
+            let out = match String::from_utf8(out) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to gather cluster metadata for {hostid}: could not decode the gathered output: {}",
+                        e.to_string()
+                    ))))
+                    .await;
+                    return;
+                }
+            };
+
+            let wlms = managers::parse_wlms(&out);
+            if !wlms.contains(&managers::WorkloadManager::Slurm) {
+                let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "no supported workload managers found on {hostid}; identified workload managers: {:?}",
+                        wlms
+                    ))))
+                    .await;
+                return;
+            }
+            // Server is connected and we have Slurm on it - now let's gather some facts about it
+            // and create a database record
+            let (out, err, code) = match sm.exec_capture(os::GATHER_OS_INFO_CMD).await {
+                Ok((vo, ve, ec)) => (vo, ve, ec),
+                Err(e) => {
+                    let _ = evt_tx
+                        .send(Err(Status::aborted(format!(
+                            "failed to gather cluster os metadata for {hostid}: {}",
+                            e.to_string()
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+
+            if code != 0 {
+                let err_message =
+                    String::from_utf8(err).unwrap_or("<error message could not be decoded>".into());
+                let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to gather cluster os metadata for {hostid}: remote command returned non-zero exit code {}, and error message : {}",
+                        code,
+                        err_message
+                    ))))
+                    .await;
+                return;
+            }
+            let out = match String::from_utf8(out) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to gather cluster os metadata for {hostid}: could not decode the gathered output: {}",
+                        e.to_string()
+                    ))))
+                    .await;
+                    return;
+                }
+            };
+
+            let os_info = match os::parse_distro_info(&out) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to gather cluster os metadata for {hostid}: could not parse the gathered output: {}",
+                        e.to_string()
+                    ))))
+                    .await;
+                    return;
+                }
+            };
+
+            /*
+                        if let Err(err) = mgr
+                            .sync_dir(
+                                &local_path,
+                                &remote_path,
+                                Some(1024 * 1024),
+                                None,
+                                &evt_tx.clone(),
+                                mfa_rx,
+                            )
+                            .await
+                        {
+                            let _ = evt_tx
+                                .send(Ok(StreamEvent {
+                                    event: Some(stream_event::Event::Error(err.to_string())),
+                                }))
+                                .await;
+                        }
+            */
+        });
+
+        let out: OutStream = Box::pin(receiver_to_stream(evt_rx));
+        Ok(tonic::Response::new(out))
     }
 }
 
