@@ -29,7 +29,7 @@ pub fn parse_wlms(output: &str) -> HashSet<WorkloadManager> {
         .collect()
 }
 
-pub const DETERMINE_HPC_WORKLOAD_MANAGERS_CMD: &str = r#"for p in srun:SLURM qsub:PBS condor_q:HTCONDOR flux:FLUX; do bin=${p%%:*}; name=${p#*:}; command -v "$bin" >/dev/null 2>&1 && echo "$name"; done"#;
+pub const DETERMINE_HPC_WORKLOAD_MANAGERS_CMD: &str = r#"for p in srun:SLURM qsub:PBS condor_q:HTCONDOR flux:FLUX; do bin=${p%%:*}; name=${p#*:}; command -v "$bin" >/dev/null 2>&1 && echo "$name" || continue; done"#;
 
 #[cfg(test)]
 mod tests {

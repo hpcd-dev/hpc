@@ -49,10 +49,19 @@ pub struct Distro {
 pub struct NewHost {
     /// Short, memorable, globally-unique id (e.g., "gpu01", "c1", "node-a")
     pub hostid: String,
+    /// Username for server
     pub username: String,
+    /// hostname or IP address
     pub address: Address,
+    // ssh port
+    pub port: u16,
+    // ssh identity path
+    pub identity_path: Option<String>,
+    // WLM version, TODO: make this more general
     pub slurm: SlurmVersion,
+    /// Linux distribution installed on cluster head
     pub distro: Distro,
+    /// version of kernel on cluster host
     pub kernel_version: String,
 }
 
@@ -64,6 +73,8 @@ pub struct HostRecord {
     pub hostid: String,
     pub username: String,
     pub address: Address,
+    pub port: u16,
+    pub identity_path: Option<String>,
     pub slurm: SlurmVersion,
     pub distro: Distro,
     pub kernel_version: String,
@@ -136,6 +147,8 @@ impl HostStore {
               username TEXT NOT NULL,
               hostname TEXT,
               ip TEXT,
+              port INTEGER NOT NULL,
+              identity_path TEXT,
               slurm_major INTEGER NOT NULL,
               slurm_minor INTEGER NOT NULL,
               slurm_patch INTEGER NOT NULL,
@@ -234,8 +247,9 @@ impl HostStore {
               hostid,
               username, hostname, ip,
               slurm_major, slurm_minor, slurm_patch,
-              distro_name, distro_version, kernel_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              distro_name, distro_version, kernel_version, 
+              port, identity_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -249,6 +263,8 @@ impl HostStore {
         .bind(&host.distro.name)
         .bind(&host.distro.version)
         .bind(&host.kernel_version)
+        .bind(&host.port)
+        .bind(&host.identity_path)
         .fetch_one(&self.pool)
         .await?;
 
@@ -301,8 +317,10 @@ impl HostStore {
               distro_name = ?8,
               distro_version = ?9,
               kernel_version = ?10,
-              updated_at = ?11
-            WHERE id = ?12
+              updated_at = ?11,
+              port = ?12,
+              identity_path = ?13
+            WHERE id = ?14
             "#,
         )
         .bind(&host.hostid)
@@ -316,6 +334,8 @@ impl HostStore {
         .bind(&host.distro.version)
         .bind(&host.kernel_version)
         .bind(now)
+        .bind(&host.port)
+        .bind(&host.identity_path)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -478,6 +498,8 @@ fn row_to_host(row: sqlx::sqlite::SqliteRow) -> HostRecord {
         kernel_version: row.try_get("kernel_version").unwrap(),
         created_at: row.try_get("created_at").unwrap(),
         updated_at: row.try_get("updated_at").unwrap(),
+        port: row.try_get("port").unwrap(),
+        identity_path: row.try_get("identity_path").unwrap(),
     }
 }
 
@@ -503,6 +525,8 @@ mod tests {
                 version: "22.04".into(),
             },
             kernel_version: "6.5.0-41-generic".into(),
+            port: 22,
+            identity_path: Some("/home/jeff/.ssh/id_ed25519".to_string()),
         }
     }
 

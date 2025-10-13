@@ -1,14 +1,23 @@
 use crate::ssh::SessionManager;
 use crate::ssh::SshParams;
 use crate::ssh::receiver_to_stream;
+use crate::state::db::HostRecord;
 use crate::state::db::HostStore;
+use crate::state::db::HostStoreError;
+use crate::state::db::SlurmVersion;
 use crate::util;
+use proto::ListClustersRequest;
+use proto::ListClustersResponse;
+use proto::ListClustersUnitResponse;
 use proto::agent_server::{Agent, AgentServer};
+use proto::list_clusters_unit_response;
 use proto::{
     AddClusterRequest, MfaAnswer, MfaPrompt, PingReply, PingRequest, StreamEvent, SubmitRequest,
     agent_client, stream_event,
 };
+use std::any::Any;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use thiserror::Error as ThisError;
 use tokio::sync::Mutex;
@@ -43,15 +52,17 @@ pub enum AgentSvcError {
 #[derive(Clone)]
 pub struct AgentSvc {
     mgr: Arc<RwLock<HashMap<String, Arc<SessionManager>>>>,
-    hs: HostStore,
+    hs: Arc<RwLock<HostStore>>,
 }
 impl AgentSvc {
     pub fn new(hs: HostStore) -> Self {
         let mgr = HashMap::new();
         let mgr_inner = Arc::new(RwLock::new(mgr));
+
+        let hs_inner = Arc::new(RwLock::new(hs));
         AgentSvc {
             mgr: mgr_inner,
-            hs: hs,
+            hs: hs_inner,
         }
     }
     /// Test if SessionManager object for hostid exists in the in-memory mapping
@@ -77,7 +88,8 @@ impl AgentSvc {
                 .clone());
         } else {
             // 1. Check if hostid is known in the database
-            let maybe_hostrecord = match self.hs.get_by_hostid(hostid).await {
+            let hs = self.hs.clone().read_owned().await;
+            let maybe_hostrecord = match hs.get_by_hostid(hostid).await {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -94,7 +106,7 @@ impl AgentSvc {
 
             // TODO: port and identity path should be stored in the database
             let port = 22;
-            let identity_path = "~/.ssh/id_ed25519".to_string();
+            let identity_path = "/Users/alexsizykh/.ssh/id_ed25519".to_string();
             let connection_addr = match hr.address {
                 crate::state::db::Address::Hostname(hn) => tokio::net::lookup_host((hn.clone(), 0))
                     .await
@@ -229,12 +241,45 @@ impl Agent for AgentSvc {
     ) -> Result<tonic::Response<Self::LsStream>, Status> {
         self.run_command("ls", "winery", request).await
     }
-
+    async fn list_clusters(
+        &self,
+        request: tonic::Request<ListClustersRequest>,
+    ) -> Result<tonic::Response<ListClustersResponse>, Status> {
+        log::info!("listing clusters");
+        let mut inbound = request.into_inner();
+        // TODO: implement filter feature
+        let hs = self.hs.clone().read_owned().await;
+        let hosts = match hs.list_hosts(None).await {
+            Ok(v) => v,
+            Err(e) => match e {
+                HostStoreError::Sqlx(sql_err) => {
+                    log::error!("unknown error at sqlx level: {}", sql_err.to_string());
+                    return Err(Status::internal(
+                        "internal error: please report this  error along with daemon logs",
+                    ));
+                }
+                other_error => {
+                    log::error!(
+                        "internal error: unexpected error: {}",
+                        other_error.to_string()
+                    );
+                    return Err(Status::internal(
+                        "internal error: please report this error along with daemon logs",
+                    ));
+                }
+            },
+        };
+        let clusters = hosts
+            .iter()
+            .map(|x| db_host_record_to_api_unit_response(x))
+            .collect();
+        return Ok(ListClustersResponse { clusters: clusters }.into());
+    }
     async fn submit(
         &self,
         request: tonic::Request<tonic::Streaming<SubmitRequest>>,
     ) -> Result<tonic::Response<Self::SubmitStream>, Status> {
-        log::debug!("submit request initiated");
+        log::info!("submit request");
         // Setting up inbound stream (client -> server) carrying data or MFA answers from client to mfa_tx
         let mut inbound = request.into_inner();
 
@@ -325,20 +370,40 @@ impl Agent for AgentSvc {
             .await
             .map_err(|e| Status::unknown(format!("read error: {e}")))?
             .ok_or_else(|| Status::invalid_argument("stream closed before init"))?;
-        let (username, hostname, hostid) = match init.msg {
-            Some(proto::add_cluster_request::Msg::Init(i)) => (i.username, i.hostname, i.hostid),
+        let (username, host, hostid, identity_path, port) = match init.msg {
+            Some(proto::add_cluster_request::Msg::Init(i)) => {
+                (i.username, i.host, i.hostid, i.identity_path, i.port)
+            }
             _ => {
                 return Err(Status::invalid_argument(
                     "first message must be init(username, hostname, hostid)",
                 ));
             }
         };
-
+        let host = match host {
+            Some(v) => v,
+            None => return Err(Status::invalid_argument("empty host in initial message")),
+        };
+        let addr = match host {
+            proto::add_cluster_init::Host::Hostname(v) => crate::state::db::Address::Hostname(v),
+            proto::add_cluster_init::Host::Ipaddr(addr) => {
+                let ip: IpAddr = match addr.parse() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(Status::invalid_argument(format!(
+                            "could not parse {} into ip address: {:?}",
+                            addr, e
+                        )));
+                    }
+                };
+                crate::state::db::Address::Ip(ip)
+            }
+        };
         log::debug!(
-            "adding cluster (hostid={},username={},hostname={})",
+            "adding cluster (hostid={},username={},address={:?})",
             &hostid,
             &username,
-            &hostname
+            &addr
         );
         let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
 
@@ -353,38 +418,52 @@ impl Agent for AgentSvc {
                 }
             }
         });
-        let port = 22;
-        let identity_path = "~/.ssh/id_ed25519";
 
-        let connection_addr = match util::net::lookup_first_addr(&hostname, port).await {
+        // TODO: this also should be configurable and stored in the database
+        let port = match u16::try_from(port) {
             Ok(v) => v,
-            Err(e) => match e {
-                util::net::NetError::DnsNotFound(h) => {
-                    return Err(Status::invalid_argument(format!(
-                        "hostname {hostname} could not be resolved"
-                    )));
+            Err(e) => {
+                log::debug!("could not case u32 port to u16 port: {}", e.to_string());
+                return Err(Status::invalid_argument(format!(
+                    "invalid port value: {port}"
+                )));
+            }
+        };
+
+        let connection_addr = match addr {
+            crate::state::db::Address::Ip(v) => (v, port).into(),
+            crate::state::db::Address::Hostname(ref hostname) => {
+                match util::net::lookup_first_addr(hostname, port).await {
+                    Ok(v) => v,
+                    Err(e) => match e {
+                        util::net::NetError::DnsNotFound(_) => {
+                            return Err(Status::invalid_argument(format!(
+                                "hostname {hostname} could not be resolved"
+                            )));
+                        }
+                        util::net::NetError::NoAddrs(_) => {
+                            return Err(Status::invalid_argument(format!(
+                                "couldn't find any IP addresses for {hostname}"
+                            )));
+                        }
+                        util::net::NetError::Resolve(h) => {
+                            return Err(Status::internal(format!(
+                                "encountered error when resolving {hostname}: {}",
+                                h.to_string()
+                            )));
+                        }
+                    },
                 }
-                util::net::NetError::NoAddrs(h) => {
-                    return Err(Status::invalid_argument(format!(
-                        "couldn't find any IP addresses for {hostname}"
-                    )));
-                }
-                util::net::NetError::Resolve(h) => {
-                    return Err(Status::internal(format!(
-                        "encountered error when resolving {hostname}: {}",
-                        h.to_string()
-                    )));
-                }
-            },
+            }
         };
         let ssh_params = SshParams {
             username: username.to_string(),
             addr: connection_addr,
-            identity_path: Some(identity_path.to_string()),
+            identity_path: identity_path,
             keepalive_secs: 60,
             ki_submethods: None,
         };
-
+        let hs = self.hs.clone().write_owned().await;
         tokio::spawn(async move {
             let sm = SessionManager::new(ssh_params);
             if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
@@ -396,6 +475,8 @@ impl Agent for AgentSvc {
                     .await;
                 return;
             };
+
+            // Determine workload manager
             let (out, err, code) = match sm
                 .exec_capture(managers::DETERMINE_HPC_WORKLOAD_MANAGERS_CMD)
                 .await
@@ -438,6 +519,7 @@ impl Agent for AgentSvc {
             };
 
             let wlms = managers::parse_wlms(&out);
+            // TODO: add support for other WLMs
             if !wlms.contains(&managers::WorkloadManager::Slurm) {
                 let _ = evt_tx
                     .send(Err(Status::aborted(format!(
@@ -499,26 +581,35 @@ impl Agent for AgentSvc {
                     return;
                 }
             };
-
-            /*
-                        if let Err(err) = mgr
-                            .sync_dir(
-                                &local_path,
-                                &remote_path,
-                                Some(1024 * 1024),
-                                None,
-                                &evt_tx.clone(),
-                                mfa_rx,
-                            )
-                            .await
-                        {
-                            let _ = evt_tx
-                                .send(Ok(StreamEvent {
-                                    event: Some(stream_event::Event::Error(err.to_string())),
-                                }))
-                                .await;
-                        }
-            */
+            let distro_info = crate::state::db::Distro {
+                name: os_info.id,
+                version: os_info.version,
+            };
+            let new_host = crate::state::db::NewHost {
+                username: username,
+                hostid: hostid,
+                address: addr.clone(),
+                distro: distro_info,
+                kernel_version: os_info.kernel,
+                slurm: SlurmVersion {
+                    // TODO: implement actual version gathering
+                    major: 10,
+                    minor: 10,
+                    patch: 10,
+                },
+                port: 22,
+                identity_path: None,
+            };
+            match hs.insert_host(&new_host).await {
+                Ok(v) => {
+                    log::debug!("successfully inserted host with id {v}")
+                }
+                Err(e) => {
+                    let _ = evt_tx.send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(e.to_string())),
+                    }));
+                }
+            };
         });
 
         let out: OutStream = Box::pin(receiver_to_stream(evt_rx));
@@ -529,4 +620,22 @@ impl Agent for AgentSvc {
 #[cfg(test)]
 mod tests {
     use super::*;
+}
+
+fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitResponse {
+    let rp = ListClustersUnitResponse {
+        username: hs.username.clone(),
+        identity_path: hs.identity_path.to_owned(),
+        host: match hs.address {
+            crate::state::db::Address::Ip(ref ip) => {
+                Some(list_clusters_unit_response::Host::Ipaddr(ip.to_string()))
+            }
+            crate::state::db::Address::Hostname(ref hostname) => Some(
+                list_clusters_unit_response::Host::Hostname(hostname.to_owned()),
+            ),
+        },
+        port: hs.port as i32,
+        connected: false,
+    };
+    return rp;
 }

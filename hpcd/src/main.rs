@@ -20,15 +20,6 @@ mod util;
 #[command(version,about,long_about = None)]
 struct Opts {
     #[arg(short, long)]
-    remote_server: String,
-
-    #[arg(short, long)]
-    username: String,
-
-    #[arg(short, long)]
-    identity_path: String,
-
-    #[arg(short, long)]
     database_path: String,
 }
 

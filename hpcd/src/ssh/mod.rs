@@ -462,20 +462,28 @@ impl SessionManager {
         }
         Ok(())
     }
-    async fn write_remote_temp_exe(&self, content: &[u8], suffix: &str) -> Result<String> {
-        let sftp = self.sftp().await?;
-        let rand: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(10)
-            .map(char::from)
-            .collect();
-        let path = format!("/tmp/hpcd_{}.{}", rand, suffix.trim_start_matches('.'));
 
+    /// checks if remote hasher already exists on remote
+    /// if it does - exit and do nothing
+    /// if it doesn't - writes file to remote
+    /// TODO - we don't need to do this within sync_one_file
+    async fn ensure_remote_temp_exe(
+        &self,
+        content: &[u8],
+        session_id: &str,
+        suffix: &str,
+    ) -> Result<String> {
+        let sftp = self.sftp().await?;
+        let path = format!(
+            "/tmp/hpcd_{}.{}",
+            session_id,
+            suffix.trim_start_matches('.')
+        );
+        if sftp.try_exists(&path).await? {
+            return Ok(path);
+        }
         // Create & write
-        let flags = OpenFlags::WRITE
-            .union(OpenFlags::CREATE)
-            .union(OpenFlags::APPEND)
-            .union(OpenFlags::TRUNCATE);
+        let flags = OpenFlags::WRITE.union(OpenFlags::CREATE);
         let mut attrs = FileAttributes::default();
         attrs.permissions = Some(0o700);
         let mut f = sftp
@@ -496,6 +504,7 @@ impl SessionManager {
     async fn remote_block_hashes(
         &self,
         remote_path: &str,
+        session_id: &str,
         block_size: usize,
     ) -> Result<Vec<String>> {
         let py_script = format!(
@@ -524,8 +533,11 @@ sys.stdout.flush()
             ),
             bs = block_size
         );
+        // TODO: ensure_remote_path_exe can be run once per transfer, no need to do this for every
+        // file: even if script on remote exists, it will require some network trafic to check if
+        // it exists.
         let script_path = self
-            .write_remote_temp_exe(py_script.as_bytes(), "py")
+            .ensure_remote_temp_exe(py_script.as_bytes(), session_id, "py")
             .await?;
         let cmd_py3 = format!("python3 -u {}", &script_path);
         let (out, err, code) = self.exec_capture(&cmd_py3).await?;
@@ -564,6 +576,7 @@ sys.stdout.flush()
         sftp: &SftpSession,
         local_path: &Path,
         remote_path: &str,
+        session_id: &str,
         block_size: usize,
     ) -> Result<()> {
         let lmeta = tokiofs::metadata(local_path).await?;
@@ -654,7 +667,10 @@ sys.stdout.flush()
         // Plan: compute remote block hashes (without downloading file data) by running
         // a tiny Python hashing script *on the remote* over an exec channel.
         // If that fails (python missing, permission issues, etc), fall back to full upload.
-        let remote_hashes = match self.remote_block_hashes(remote_path, block_size).await {
+        let remote_hashes = match self
+            .remote_block_hashes(remote_path, session_id, block_size)
+            .await
+        {
             Ok(h) => Some(h),
             Err(e) => {
                 log::warn!(
@@ -765,6 +781,12 @@ sys.stdout.flush()
         log::info!("making sure the remote directory exists");
         self.ensure_remote_dir(&sftp, remote_dir).await?;
 
+        let session_id: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+
         let mut work: Vec<(PathBuf, String)> = Vec::new();
 
         let follow_links = false;
@@ -799,13 +821,20 @@ sys.stdout.flush()
             work.push((path_local, remote_path));
         }
         drop(sftp_for_dirs);
-        let results = futures::stream::iter(work.into_iter().map(
-            |(local_path, remote_path)| async move {
+        let results = futures::stream::iter(work.into_iter().map(|(local_path, remote_path)| {
+            let session_id_clone = session_id.clone();
+            async move {
                 let sftp = self.sftp().await?;
-                self.sync_one_file(&sftp, &local_path, &remote_path, block_size)
-                    .await
-            },
-        ))
+                self.sync_one_file(
+                    &sftp,
+                    &local_path,
+                    &remote_path,
+                    &session_id_clone,
+                    block_size,
+                )
+                .await
+            }
+        }))
         .buffer_unordered(parallelism)
         .collect::<Vec<_>>()
         .await;

@@ -1,9 +1,9 @@
 use anyhow::bail;
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use proto::agent_client::AgentClient;
 use proto::{
     AddClusterInit, AddClusterRequest, MfaAnswer, PingReply, PingRequest, StreamEvent,
-    SubmitRequest, SubmitRequestInit, add_cluster_request, stream_event,
+    SubmitRequest, SubmitRequestInit, add_cluster_init, add_cluster_request, stream_event,
 };
 use std::io::Write;
 use tokio::io;
@@ -25,15 +25,41 @@ enum Cmd {
     Ping,
     Ls,
     Submit {
+        hostid: String,
         local_path: String,
         remote_path: String,
     },
-    AddCluster {
-        ClusterID: String,
-        Username: String,
-        Hostname: String,
-    }, //    Status { job_id: String },
-       //    Logs   { job_id: String },
+    AddCluster(AddClusterArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(
+    group(
+        ArgGroup::new("addcluster")
+            .required(true)      // at least one is required…
+            .multiple(false)     // …and they are mutually exclusive
+            .args(&["hostname", "ip"])
+    )
+)]
+struct AddClusterArgs {
+    #[arg(long, value_name = "HOSTNAME")]
+    hostname: Option<String>,
+
+    /// Use a remote URL as input
+    #[arg(long, value_name = "IP")]
+    ip: Option<String>,
+
+    #[arg(long)]
+    username: String,
+
+    #[arg(long)]
+    hostid: String,
+
+    #[arg(long, default_value_t = 22)]
+    port: u32,
+
+    #[arg(long, default_value = "~/.ssh/id_ed25519")]
+    identity_path: String,
 }
 
 async fn send_ping(client: &mut AgentClient<Channel>) -> anyhow::Result<()> {
@@ -139,6 +165,8 @@ async fn send_ls(client: &mut AgentClient<Channel>) -> anyhow::Result<()> {
 
 async fn send_submit(
     client: &mut AgentClient<Channel>,
+
+    hostid: &str,
     local_path: &str,
     remote_path: &str,
 ) -> anyhow::Result<()> {
@@ -150,7 +178,7 @@ async fn send_submit(
             msg: Some(proto::submit_request::Msg::Init(proto::SubmitRequestInit {
                 local_path: local_path.to_owned(),
                 remote_path: remote_path.to_owned(),
-                hostid: "gpurig".to_owned(),
+                hostid: hostid.to_owned(),
             })),
         })
         .await?;
@@ -232,15 +260,28 @@ async fn send_add_cluster(
     client: &mut AgentClient<Channel>,
     host_id: &str,
     username: &str,
-    hostname: &str,
+    hostname: &Option<String>,
+    ip: &Option<String>,
+    identity_path: &str,
+    port: u32,
 ) -> anyhow::Result<()> {
     // outgoing stream client -> server with MFA answers
     let (tx_ans, rx_ans) = mpsc::channel::<AddClusterRequest>(16);
     let outbound = ReceiverStream::new(rx_ans);
+    let host: add_cluster_init::Host = match hostname {
+        Some(v) => add_cluster_init::Host::Hostname(v.into()),
+        None => match ip {
+            Some(v) => add_cluster_init::Host::Ipaddr(v.into()),
+            None => anyhow::bail!("both hostname and ip address can't be none"),
+        },
+    };
+    let identity_path_expanded = shellexpand::full(identity_path)?;
     let init = AddClusterInit {
         hostid: host_id.to_owned(),
-        hostname: hostname.to_owned(),
         username: username.to_owned(),
+        host: Some(host),
+        identity_path: Some(identity_path_expanded.to_string()),
+        port: port,
     };
     let acr = AddClusterRequest {
         msg: Some(add_cluster_request::Msg::Init(init)),
@@ -366,14 +407,22 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::Ls => send_ls(&mut client).await?,
         Cmd::Submit {
+            hostid,
             local_path,
             remote_path,
-        } => send_submit(&mut client, &local_path, &remote_path).await?,
-        Cmd::AddCluster {
-            ClusterID: cluster_id,
-            Username: username,
-            Hostname: hostname,
-        } => send_add_cluster(&mut client, &cluster_id, &username, &hostname).await?,
+        } => send_submit(&mut client, &hostid, &local_path, &remote_path).await?,
+        Cmd::AddCluster(add_cluster_args) => {
+            send_add_cluster(
+                &mut client,
+                &add_cluster_args.hostid,
+                &add_cluster_args.username,
+                &add_cluster_args.hostname,
+                &add_cluster_args.ip,
+                &add_cluster_args.identity_path,
+                add_cluster_args.port,
+            )
+            .await?
+        }
     }
     Ok(())
 }
