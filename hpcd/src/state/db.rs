@@ -132,7 +132,7 @@ pub enum HostStoreError {
 // This structure is used for inserting data into the db when data first appears
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct PartitionSpec {
+pub struct NewPartition {
     /// Slurm partition name
     pub name: String,
     /// Arbitrary metadata
@@ -538,7 +538,7 @@ impl HostStore {
     pub async fn upsert_partition_by_hostid(
         &self,
         hostid: &str,
-        spec: &PartitionSpec,
+        spec: &NewPartition,
     ) -> Result<i64> {
         let host_id = self
             .find_id_by_hostid(hostid)
@@ -594,7 +594,7 @@ impl HostStore {
     pub async fn replace_partitions_by_hostid(
         &self,
         hostid: &str,
-        parts: &[PartitionSpec],
+        parts: &[NewPartition],
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
@@ -899,7 +899,7 @@ mod tests {
             "TRES".into(),
             serde_json::json!("cpu=64,mem=990000M,node=2,billing=64,gres/gpu=8"),
         );
-        let spec = PartitionSpec {
+        let spec = NewPartition {
             name: "gpu".into(),
             info: Some(serde_json::to_value(&info_map).unwrap()),
         };
