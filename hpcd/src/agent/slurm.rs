@@ -121,6 +121,24 @@ fn parse_slurm_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(total))
 }
 
+pub fn parse_job_id(line: &str) -> Option<u64> {
+    // Expect message from sbatch like: "Submitted batch job 11"
+    // Strategy:
+    // 1. Find the substring "job "
+    // 2. Take everything after it
+    // 3. Parse that as an integer (11, for the example string above)
+
+    // Find where "job " occurs
+    let marker = "job ";
+    let idx = line.find(marker)?;
+
+    // Slice from the end of "job " to the end of the string
+    let after_job = &line[idx + marker.len()..];
+
+    // Trim spaces just in case, then parse as u64
+    after_job.trim().parse::<u64>().ok()
+}
+
 // returns a command to be executed on cluster to submit the job
 pub fn path_to_sbatch_command(p: &str, remote_base_path: Option<&str>) -> String {
     if let Some(chdir_path) = remote_base_path {

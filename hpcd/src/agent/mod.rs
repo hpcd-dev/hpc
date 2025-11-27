@@ -379,16 +379,38 @@ impl Agent for AgentSvc {
                     return;
                 }
             };
+
+            // TODO: parse output to get job id
             log::debug!(
                 "submitted remote script, received from sbatch code {}, error message: {}",
                 code,
                 String::from_utf8(err).unwrap()
             );
-            let _ = evt_tx
-                .send(Ok(StreamEvent {
-                    event: Some(stream_event::Event::Stdout(out)),
-                }))
-                .await;
+            let outString = String::from_utf8_lossy(&out);
+            let jobId = slurm::parse_job_id(&outString);
+
+            match jobId {
+                Some(v) => {
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Stdout(
+                                format!("Successfully submitted sbatch script with jobId: {}", v)
+                                    .into(),
+                            )),
+                        }))
+                        .await;
+                }
+                None => {
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Stdout(
+                                "Successfully submitted sbatch script, could not get a valid jobId"
+                                    .into(),
+                            )),
+                        }))
+                        .await;
+                }
+            }
         });
 
         let out: OutStream = Box::pin(receiver_to_stream(evt_rx));
@@ -712,10 +734,7 @@ impl Agent for AgentSvc {
                     return;
                 }
             };
-            let accounting_enabled = match code {
-                0 => true,
-                _ => false,
-            };
+            let accounting_enabled = matches!(code, 0);
             let new_host = crate::state::db::NewHost {
                 username: username,
                 hostid: hostid.clone(),
