@@ -121,7 +121,7 @@ fn parse_slurm_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(total))
 }
 
-pub fn parse_job_id(line: &str) -> Option<u64> {
+pub fn parse_job_id(line: &str) -> Option<i64> {
     // Expect message from sbatch like: "Submitted batch job 11"
     // Strategy:
     // 1. Find the substring "job "
@@ -136,7 +136,7 @@ pub fn parse_job_id(line: &str) -> Option<u64> {
     let after_job = &line[idx + marker.len()..];
 
     // Trim spaces just in case, then parse as u64
-    after_job.trim().parse::<u64>().ok()
+    after_job.trim().parse::<i64>().ok()
 }
 
 // returns a command to be executed on cluster to submit the job

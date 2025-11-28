@@ -5,6 +5,7 @@ use crate::state::db::HostRecord;
 use crate::state::db::HostStore;
 use crate::state::db::HostStoreError;
 use crate::state::db::JobRecord;
+use crate::state::db::NewJob;
 use crate::state::db::SlurmVersion;
 use crate::util;
 use proto::ListClustersRequest;
@@ -340,6 +341,7 @@ impl Agent for AgentSvc {
                 }
             },
         };
+        let hs = self.hs.clone().write_owned().await;
         tokio::spawn(async move {
             //1. Sync data
             if let Err(err) = mgr
@@ -390,26 +392,52 @@ impl Agent for AgentSvc {
             let outString = String::from_utf8_lossy(&out);
             let jobId = slurm::parse_job_id(&outString);
 
-            match jobId {
-                Some(v) => {
+            let Ok(Some(hr)) = hs.get_by_hostid(&hostid).await else {
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(format!(
+                            "Could not resolve hostid '{}'",
+                            hostid
+                        ))),
+                    }))
+                    .await;
+                return;
+            };
+
+            let nj = NewJob {
+                job_id: jobId,
+                host_id: hr.id,
+            };
+            match hs.insert_job(&nj).await {
+                Ok(internal_job_id) => match jobId {
+                    Some(v) => {
+                        let _ = evt_tx
+                                .send(Ok(StreamEvent {
+                                    event: Some(stream_event::Event::Stdout(
+                                        format!("Successfully submitted sbatch script with job id {} , internal job id {}", v, internal_job_id)
+                                            .into(),
+                                    )),
+                                }))
+                                .await;
+                    }
+                    None => {
+                        let _ = evt_tx
+                                .send(Ok(StreamEvent {
+                                    event: Some(stream_event::Event::Stdout(
+                                        format!("Successfully submitted sbatch script, did not receive a vaild job id from system; internal job id {}", internal_job_id).into()
+                                    )),
+                                }))
+                                .await;
+                    }
+                },
+                Err(e) => {
                     let _ = evt_tx
-                        .send(Ok(StreamEvent {
-                            event: Some(stream_event::Event::Stdout(
-                                format!("Successfully submitted sbatch script with jobId: {}", v)
-                                    .into(),
-                            )),
-                        }))
-                        .await;
-                }
-                None => {
-                    let _ = evt_tx
-                        .send(Ok(StreamEvent {
-                            event: Some(stream_event::Event::Stdout(
-                                "Successfully submitted sbatch script, could not get a valid jobId"
-                                    .into(),
-                            )),
-                        }))
-                        .await;
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(
+                                    format!("Successfully submitted sbatch script with job id {:?}, failed to create internal record: {}", jobId, e)
+                                )),
+                            }))
+                            .await;
                 }
             }
         });
