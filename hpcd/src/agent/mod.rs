@@ -4,6 +4,7 @@ use crate::ssh::receiver_to_stream;
 use crate::state::db::HostRecord;
 use crate::state::db::HostStore;
 use crate::state::db::HostStoreError;
+use crate::state::db::JobRecord;
 use crate::state::db::SlurmVersion;
 use crate::util;
 use proto::ListClustersRequest;
@@ -12,8 +13,8 @@ use proto::ListClustersUnitResponse;
 use proto::agent_server::{Agent, AgentServer};
 use proto::list_clusters_unit_response;
 use proto::{
-    AddClusterRequest, MfaAnswer, MfaPrompt, PingReply, PingRequest, StreamEvent, SubmitRequest,
-    agent_client, stream_event,
+    AddClusterRequest, ListJobsRequest, ListJobsResponse, ListJobsUnitResponse, MfaAnswer,
+    MfaPrompt, PingReply, PingRequest, StreamEvent, SubmitRequest, agent_client, stream_event,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -762,6 +763,48 @@ impl Agent for AgentSvc {
         let out: OutStream = Box::pin(receiver_to_stream(evt_rx));
         Ok(tonic::Response::new(out))
     }
+
+    async fn list_jobs(
+        &self,
+        request: tonic::Request<ListJobsRequest>,
+    ) -> Result<tonic::Response<ListJobsResponse>, Status> {
+        log::info!("listing clusters");
+        let mut inbound = request.into_inner();
+
+        let hs = self.hs.clone().read_owned().await;
+        let jobs = match inbound.hostid {
+            Some(ref v) => {
+                // 1. resolve integer id
+                let Ok(Some(hr)) = hs.get_by_hostid(v).await else {
+                    return Err(Status::invalid_argument(format!("hostid {} is unknown", v)));
+                };
+
+                match hs.list_jobs_for_host(hr.id).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(Status::internal(format!(
+                            "couldn't list jobs for host '{}': {}",
+                            hr.hostid, e
+                        )));
+                    }
+                }
+            }
+            None => match hs.list_all_jobs().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(Status::internal(format!(
+                        "couldn't list jobs for all hosts: {}",
+                        e
+                    )));
+                }
+            },
+        };
+        let api_jobs = jobs
+            .into_iter()
+            .map(|jr: JobRecord| db_job_record_to_api_unit_response(&jr))
+            .collect();
+        return Ok(tonic::Response::new(ListJobsResponse { jobs: api_jobs }));
+    }
 }
 
 #[cfg(test)]
@@ -784,6 +827,18 @@ fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitRespo
         port: hs.port as i32,
         connected: false,
         hostid: hs.hostid.to_owned(),
+    };
+    return rp;
+}
+
+fn db_job_record_to_api_unit_response(jr: &JobRecord) -> ListJobsUnitResponse {
+    let rp = ListJobsUnitResponse {
+        hostid: jr.host_id.clone(),
+        internal_job_id: jr.id,
+        job_id: jr.job_id,
+        created_at: jr.created_at.clone(),
+        finished_at: jr.finished_at.clone(),
+        is_completed: jr.is_completed,
     };
     return rp;
 }

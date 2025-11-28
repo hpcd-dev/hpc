@@ -156,7 +156,27 @@ pub struct PartitionRecord {
 }
 pub type Result<T> = std::result::Result<T, HostStoreError>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct NewJob {
+    /// Job ID; host-specific. Database will additionally keep its own, internal id
+    pub job_id: Option<i64>,
+    /// Host ID on which the job is submitted.
+    pub host_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct JobRecord {
+    pub id: i64,
+    pub job_id: Option<i64>,
+    pub host_id: String,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+    pub is_completed: bool,
+}
 /// Async store
+/// TODO: since it stores not only hosts but also partitions, jobs etc., this needs to be renamed.
 #[derive(Clone)]
 pub struct HostStore {
     pool: SqlitePool,
@@ -310,7 +330,25 @@ impl HostStore {
 
         Ok(())
     }
-
+    async fn ensure_jobs_table(&self) -> Result<()> {
+        sqlx::query(
+            r#"
+        create table if not exists jobs (
+          id integer primary key autoincrement,
+          job_id integer,
+          host_id integer not null references hosts(id) on delete cascade,
+          is_completed boolean default 0,
+          created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          completed_at text,
+        );
+        create index if not exists idx_jobs_host_id on jobs(host_id);
+        create index if not  exists idx_jobs_job_id_host_id  on jobs(job_id,host_id);
+    "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
     /// Insert a new host. Returns the new row id.
     pub async fn insert_host(&self, host: &NewHost) -> Result<i64> {
         if host.hostid.trim().is_empty() {
@@ -447,16 +485,16 @@ impl HostStore {
 
     /// Get a host by row id.
     pub async fn get_host(&self, id: i64) -> Result<Option<HostRecord>> {
-        let row = sqlx::query("SELECT * FROM hosts WHERE id = ?")
+        let row = sqlx::query("select * from hosts where id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(row_to_host))
     }
 
-    /// Get a host by `hostid` (fast path via unique index).
+    /// Get a host by human-readable `hostid` (fast, uses unique index).
     pub async fn get_by_hostid(&self, hostid: &str) -> Result<Option<HostRecord>> {
-        let row = sqlx::query("SELECT * FROM hosts WHERE hostid = ?")
+        let row = sqlx::query("select * from hosts where hostid = ?")
             .bind(hostid)
             .fetch_optional(&self.pool)
             .await?;
@@ -642,6 +680,56 @@ impl HostStore {
         let parts = self.list_partitions_by_hostid(hostid).await?;
         Ok(Some((host, parts)))
     }
+
+    pub async fn insert_job(&self, job: &NewJob) -> Result<i64> {
+        let rec = sqlx::query(
+            r#"
+        insert into jobs(job_id, host_id)
+        values (?1, ?2)
+        returning id;
+    "#,
+        )
+        .bind(job.job_id)
+        .bind(job.host_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(rec.try_get::<i64, _>("id")?)
+    }
+
+    pub async fn list_jobs_for_host(&self, host_id: i64) -> Result<Vec<JobRecord>> {
+        let rows = sqlx::query(
+            r#"
+            with all_jobs as (
+                select * from jobs where host_id = ?1
+            )
+            select aj.job_id,aj.is_completed,aj.created_at,aj.finished_at,h.hostid
+            from all_jobs aj
+            join hosts h
+              on aj.host_id = h.id;
+            "#,
+        )
+        .bind(host_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_job).collect())
+    }
+
+    pub async fn list_all_jobs(&self) -> Result<Vec<JobRecord>> {
+        let rows = sqlx::query(
+            r#"
+            with all_jobs as (
+                select * from jobs
+            )
+            select aj.job_id,aj.is_completed,aj.created_at,aj.finished_at,h.hostid
+            from all_jobs aj
+            join hosts h
+              on aj.host_id = h.id;
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_job).collect())
+    }
 }
 
 // -- helpers
@@ -701,6 +789,17 @@ fn row_to_partition(row: sqlx::sqlite::SqliteRow) -> PartitionRecord {
         info,
         created_at: row.try_get("created_at").unwrap(),
         updated_at: row.try_get("updated_at").unwrap(),
+    }
+}
+
+fn row_to_job(row: sqlx::sqlite::SqliteRow) -> JobRecord {
+    JobRecord {
+        id: row.try_get("id").unwrap(),
+        job_id: row.try_get("job_id").unwrap(),
+        host_id: row.try_get("host_id").unwrap(),
+        created_at: row.try_get("created_at").unwrap(),
+        finished_at: row.try_get("finished_at").unwrap(),
+        is_completed: row.try_get("is_completed").unwrap(),
     }
 }
 
