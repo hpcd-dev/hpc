@@ -263,7 +263,7 @@ impl HostStore {
         )
         .execute(&self.pool)
         .await?;
-
+        self.ensure_jobs_table().await?;
         Ok(())
     }
     async fn ensure_partitions_table(&self) -> Result<()> {
@@ -333,14 +333,13 @@ impl HostStore {
     async fn ensure_jobs_table(&self) -> Result<()> {
         sqlx::query(
             r#"
-        create table if not exists jobs (
-          id integer primary key autoincrement,
-          job_id integer,
-          host_id integer not null references hosts(id) on delete cascade,
-          is_completed boolean default 0,
-          created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-          completed_at text,
-        );
+            create table if not exists jobs (
+            id integer primary key autoincrement,
+            job_id integer,
+            host_id integer not null references hosts(id) on delete cascade,
+            is_completed boolean default 0,
+            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            completed_at text);
         create index if not exists idx_jobs_host_id on jobs(host_id);
         create index if not  exists idx_jobs_job_id_host_id  on jobs(job_id,host_id);
     "#,
