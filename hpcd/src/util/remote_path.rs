@@ -28,9 +28,9 @@ pub fn resolve_relative(remote_base: impl AsRef<Path>, relative_path: impl AsRef
 /// - remove `.`
 /// - resolve .. where possible
 /// - keeps an absolute root/prefix if present
-fn normalize_path(p: &Path) -> PathBuf {
+pub fn normalize_path(p: impl AsRef<Path>) -> PathBuf {
     let mut out = PathBuf::new();
-
+    let p = p.as_ref();
     // Preserve any Windows prefix (drive/UNC) and root if present.
     let mut comps = p.components().peekable();
     while let Some(c) = comps.peek() {

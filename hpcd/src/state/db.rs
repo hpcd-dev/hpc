@@ -101,6 +101,8 @@ pub struct NewHost {
 
     /// availability of accounting (to be used for more fine-grained control over jobs)
     pub accounting_available: bool,
+
+    pub default_base_path: Option<String>,
 }
 
 /// Full stored host record.
@@ -119,6 +121,7 @@ pub struct HostRecord {
     pub created_at: String, // RFC3339
     pub updated_at: String, // RFC3339
     pub accounting_available: bool,
+    pub default_base_path: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -163,6 +166,8 @@ pub struct NewJob {
     pub job_id: Option<i64>,
     /// Host ID on which the job is submitted.
     pub host_id: i64,
+    pub local_path: String,
+    pub remote_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +179,8 @@ pub struct JobRecord {
     pub created_at: String,
     pub finished_at: Option<String>,
     pub is_completed: bool,
+    pub local_path: String,
+    pub remote_path: String,
 }
 /// Async store
 /// TODO: since it stores not only hosts but also partitions, jobs etc., this needs to be renamed.
@@ -238,6 +245,7 @@ impl HostStore {
               distro_version TEXT NOT NULL,
               kernel_version TEXT NOT NULL,
               accounting_available INTEGER NOT NULL,
+              default_base_path TEXT,
               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
               CHECK (hostname IS NOT NULL OR ip IS NOT NULL)
@@ -337,6 +345,8 @@ impl HostStore {
             id integer primary key autoincrement,
             job_id integer,
             host_id integer not null references hosts(id) on delete cascade,
+            local_path TEXT NOT NULL,
+            remote_path TEXT NOT NULL,
             is_completed boolean default 0,
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             completed_at text);
@@ -369,8 +379,8 @@ impl HostStore {
               username, hostname, ip,
               slurm_major, slurm_minor, slurm_patch,
               distro_name, distro_version, kernel_version,
-              port, identity_path,accounting_available
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              port, identity_path,accounting_available, default_base_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -387,6 +397,7 @@ impl HostStore {
         .bind(host.port)
         .bind(&host.identity_path)
         .bind(host.accounting_available)
+        .bind(&host.default_base_path)
         .fetch_one(&self.pool)
         .await?;
 
@@ -683,13 +694,15 @@ impl HostStore {
     pub async fn insert_job(&self, job: &NewJob) -> Result<i64> {
         let rec = sqlx::query(
             r#"
-        insert into jobs(job_id, host_id)
-        values (?1, ?2)
+        insert into jobs(job_id, host_id, local_path, remote_path)
+        values (?1, ?2, ?3, ?4)
         returning id;
     "#,
         )
         .bind(job.job_id)
         .bind(job.host_id)
+        .bind(job.local_path.clone())
+        .bind(job.remote_path.clone())
         .fetch_one(&self.pool)
         .await?;
         Ok(rec.try_get::<i64, _>("id")?)
@@ -701,7 +714,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs where host_id = ?1
             )
-            select aj.job_id,aj.is_completed,aj.created_at,aj.finished_at,h.hostid
+            select aj.job_id,aj.is_completed,aj.created_at,aj.finished_at,aj.local_path,aj.remote_path,h.hostid
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -719,7 +732,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs
             )
-            select aj.id as id, aj.job_id as job_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,h.hostid as hostid
+            select aj.id as id, aj.job_id as job_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -774,6 +787,7 @@ fn row_to_host(row: sqlx::sqlite::SqliteRow) -> HostRecord {
         port: row.try_get("port").unwrap(),
         identity_path: row.try_get("identity_path").unwrap(),
         accounting_available: row.try_get("accounting_available").unwrap(),
+        default_base_path: row.try_get("default_base_path").unwrap(),
     }
 }
 
@@ -799,6 +813,8 @@ fn row_to_job(row: sqlx::sqlite::SqliteRow) -> JobRecord {
         created_at: row.try_get("created_at").unwrap(),
         finished_at: row.try_get("completed_at").unwrap(),
         is_completed: row.try_get("is_completed").unwrap(),
+        local_path: row.try_get("local_path").unwrap(),
+        remote_path: row.try_get("remote_path").unwrap(),
     }
 }
 
@@ -827,6 +843,7 @@ mod tests {
             port: 22,
             identity_path: Some("/home/jeff/.ssh/id_ed25519".to_string()),
             accounting_available: true,
+            default_base_path: Some("/home/jeff/runs".to_string()),
         }
     }
 
@@ -994,6 +1011,7 @@ mod tests {
             kernel_version: "6.5.0-41-generic".into(),
             identity_path: Some("/home/alice/.ssh/id_ed25519".to_string()),
             accounting_available: true,
+            default_base_path: Some("/home/alice/runs".to_string()),
         };
         db.insert_host(&host).await.unwrap();
         let mut info_map: HashMap<String, serde_json::Value> = HashMap::new();

@@ -30,12 +30,7 @@ struct Cli {
 enum Cmd {
     Ping,
     Ls,
-    Submit {
-        hostid: String,
-        local_path: String,
-        remote_path: String,
-        sbatchscript: String,
-    },
+    Submit(SubmitArgs),
     AddCluster(AddClusterArgs),
     ListClusters,
     Init(InitProjectArgs),
@@ -85,6 +80,14 @@ struct ListJobsArgs {
     #[arg(long)]
     cluster: Option<String>,
 }
+#[derive(Args, Debug)]
+struct SubmitArgs {
+    hostid: String,
+    local_path: String,
+    sbatchscript: String,
+    #[arg(long)]
+    remote_path: Option<String>,
+}
 
 #[derive(Args, Debug)]
 #[command(
@@ -114,6 +117,9 @@ struct AddClusterArgs {
 
     #[arg(long, default_value = "~/.ssh/id_ed25519")]
     identity_path: String,
+
+    #[arg(long)]
+    default_base_path: Option<String>,
 }
 
 async fn send_ping(client: &mut AgentClient<Channel>) -> anyhow::Result<()> {
@@ -327,7 +333,7 @@ async fn send_submit(
     client: &mut AgentClient<Channel>,
     hostid: &str,
     local_path: &str,
-    remote_path: &str,
+    remote_path: &Option<String>,
     sbatchscript: &str,
 ) -> anyhow::Result<()> {
     // outgoing stream client -> server with MFA answers
@@ -425,6 +431,7 @@ async fn send_add_cluster(
     ip: &Option<String>,
     identity_path: &str,
     port: u32,
+    default_base_path: &Option<String>,
 ) -> anyhow::Result<()> {
     // outgoing stream client -> server with MFA answers
     let (tx_ans, rx_ans) = mpsc::channel::<AddClusterRequest>(16);
@@ -443,6 +450,7 @@ async fn send_add_cluster(
         host: Some(host),
         identity_path: Some(identity_path_expanded.to_string()),
         port: port,
+        default_base_path: default_base_path.to_owned(),
     };
     let acr = AddClusterRequest {
         msg: Some(add_cluster_request::Msg::Init(init)),
@@ -620,12 +628,12 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => bail!(e),
         },
         Cmd::Ls => send_ls(&mut client).await?,
-        Cmd::Submit {
+        Cmd::Submit(SubmitArgs {
             hostid,
             local_path,
             remote_path,
             sbatchscript,
-        } => {
+        }) => {
             send_submit(
                 &mut client,
                 &hostid,
@@ -644,6 +652,7 @@ async fn main() -> anyhow::Result<()> {
                 &add_cluster_args.ip,
                 &add_cluster_args.identity_path,
                 add_cluster_args.port,
+                &add_cluster_args.default_base_path,
             )
             .await?
         }

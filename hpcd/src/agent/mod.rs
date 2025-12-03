@@ -8,6 +8,7 @@ use crate::state::db::JobRecord;
 use crate::state::db::NewJob;
 use crate::state::db::SlurmVersion;
 use crate::util;
+use crate::util::remote_path::normalize_path;
 use proto::ListClustersRequest;
 use proto::ListClustersResponse;
 use proto::ListClustersUnitResponse;
@@ -26,6 +27,7 @@ use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
+use uuid::Uuid;
 mod managers;
 mod os;
 mod slurm;
@@ -308,10 +310,7 @@ impl Agent for AgentSvc {
             }
             _ => return Err(Status::invalid_argument("first message must be init(path)")),
         };
-        log::debug!("transfering data from {} to {}", &local_path, &remote_path);
         let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
-
-        // Pipe the remaining client messages (if any) into MFA answers
         let (mfa_tx, mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(16);
         tokio::spawn(async move {
             while let Ok(Some(item)) = inbound.message().await {
@@ -342,6 +341,54 @@ impl Agent for AgentSvc {
             },
         };
         let hs = self.hs.clone().write_owned().await;
+        // If remote_path is provided and is absolute -  just return it;
+        // If provided and is relative - query default_base_path
+        // If not provided - query default_base_path,
+        //      if it is logged for this cluster in the database -
+        //      randomize directory name and deploy to the random subdirectory of default_base_path.
+        let remote_path: String = match remote_path {
+            Some(v) => v,
+            None => {
+                // get host metadata;
+                let host_data = match hs.get_by_hostid(&hostid).await {
+                    Ok(Some(v)) => v,
+                    Ok(None) => {
+                        return Err(Status::invalid_argument(format!(
+                            "remote path is not provided and default_base_path for {} is not set",
+                            &hostid
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(Status::invalid_argument(format!(
+                            "could not retrieve default_base_path for {} from app's db: {}",
+                            &hostid,
+                            e.to_string()
+                        )));
+                    }
+                };
+                match host_data.default_base_path {
+                    Some(v) => {
+                        let base_path = std::path::PathBuf::from(v);
+                        let random_str = Uuid::new_v4().to_string();
+                        base_path.join(random_str).to_string_lossy().into_owned()
+                    }
+                    None => {
+                        return Err(Status::invalid_argument(format!(
+                            "remote_path is not provided and default_base_path is not set for {}",
+                            &hostid,
+                        )));
+                    }
+                }
+            }
+        };
+        log::debug!(
+            "transfering data from {} to {:?}",
+            &local_path,
+            &remote_path
+        );
+
+        // Pipe the remaining client messages (if any) into MFA answers
+
         tokio::spawn(async move {
             //1. Sync data
             if let Err(err) = mgr
@@ -383,7 +430,6 @@ impl Agent for AgentSvc {
                 }
             };
 
-            // TODO: parse output to get job id
             log::debug!(
                 "submitted remote script, received from sbatch code {}, error message: {}",
                 code,
@@ -407,6 +453,8 @@ impl Agent for AgentSvc {
             let nj = NewJob {
                 job_id: jobId,
                 host_id: hr.id,
+                local_path: local_path,
+                remote_path: remote_path,
             };
             match hs.insert_job(&nj).await {
                 Ok(internal_job_id) => match jobId {
@@ -465,10 +513,15 @@ impl Agent for AgentSvc {
             .await
             .map_err(|e| Status::unknown(format!("read error: {e}")))?
             .ok_or_else(|| Status::invalid_argument("stream closed before init"))?;
-        let (username, host, hostid, identity_path, port) = match init.msg {
-            Some(proto::add_cluster_request::Msg::Init(i)) => {
-                (i.username, i.host, i.hostid, i.identity_path, i.port)
-            }
+        let (username, host, hostid, identity_path, port, mut default_base_path) = match init.msg {
+            Some(proto::add_cluster_request::Msg::Init(i)) => (
+                i.username,
+                i.host,
+                i.hostid,
+                i.identity_path,
+                i.port,
+                i.default_base_path,
+            ),
             _ => {
                 return Err(Status::invalid_argument(
                     "first message must be init(username, hostname, hostid)",
@@ -764,6 +817,48 @@ impl Agent for AgentSvc {
                 }
             };
             let accounting_enabled = matches!(code, 0);
+
+            let normalized_default_base_path =
+                default_base_path.map(|v| normalize_path(v).to_owned());
+            // if default_base_path variable is not none - ensure it is valid and create it
+            if let Some(ref dbp) = normalized_default_base_path {
+                if dbp.is_absolute() {
+                    let command = format!("mkdir -p {}", dbp.to_string_lossy());
+                    let (_, err, code) = match sm.exec_capture(&command).await {
+                        Ok((vo, ve, ec)) => (vo, ve, ec),
+                        Err(e) => {
+                            let _ = evt_tx
+                                .send(Err(Status::internal(format!(
+                                    "failed to execute command `{}` on {}: {}",
+                                    command,
+                                    hostid,
+                                    e.to_string()
+                                ))))
+                                .await;
+                            return;
+                        }
+                    };
+                    if code != 0 {
+                        let _ = evt_tx
+                            .send(Err(Status::aborted(format!(
+                                "failed to create default_base_path on {}: {}",
+                                hostid,
+                                String::from_utf8_lossy(&err)
+                            ))))
+                            .await;
+                        return;
+                    }
+                } else {
+                    let _ = evt_tx
+                        .send(Err(Status::invalid_argument(format!(
+                            "default_base_path must be absolute, got: '{}'",
+                            dbp.to_string_lossy()
+                        ))))
+                        .await;
+                    return;
+                }
+            }
+
             let new_host = crate::state::db::NewHost {
                 username: username,
                 hostid: hostid.clone(),
@@ -774,15 +869,20 @@ impl Agent for AgentSvc {
                 port: port,
                 identity_path: identity_path,
                 accounting_available: accounting_enabled,
+                default_base_path: normalized_default_base_path
+                    .clone()
+                    .map(|v| v.to_string_lossy().into_owned()),
             };
             match hs.insert_host(&new_host).await {
                 Ok(v) => {
                     log::debug!("successfully inserted host with id {v}")
                 }
                 Err(e) => {
-                    let _ = evt_tx.send(Ok(StreamEvent {
-                        event: Some(stream_event::Event::Error(e.to_string())),
-                    }));
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(e.to_string())),
+                        }))
+                        .await;
                 }
             };
 
