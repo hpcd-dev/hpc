@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-russh = "0.54.5"
+russh = "0.55.0"
 russh-config = "0.54.5"
 russh-sftp = "2.1.1"
 tokio = { workspace = true }
