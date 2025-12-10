@@ -714,7 +714,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs where host_id = ?1
             )
-            select aj.job_id,aj.is_completed,aj.created_at,aj.finished_at,aj.local_path,aj.remote_path,h.hostid
+            select aj.id as id, aj.job_id as job_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -1058,5 +1058,32 @@ mod tests {
             qos,
             &vec![serde_json::json!("normal"), serde_json::json!("high")]
         );
+    }
+
+    #[tokio::test]
+    async fn list_jobs_for_host_filters_and_maps_fields() {
+        let db = HostStore::open_memory().await.unwrap();
+        let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
+        db.insert_host(&host).await.unwrap();
+
+        let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
+        let job = NewJob {
+            job_id: Some(42),
+            host_id: host_row.id,
+            local_path: "/tmp/local".into(),
+            remote_path: "/remote/run".into(),
+        };
+        db.insert_job(&job).await.unwrap();
+
+        let jobs = db.list_jobs_for_host(host_row.id).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        let got = &jobs[0];
+        assert_eq!(got.job_id, Some(42));
+        assert_eq!(got.host_id, "host-a");
+        assert_eq!(got.local_path, "/tmp/local");
+        assert_eq!(got.remote_path, "/remote/run");
+        assert!(!got.is_completed);
+        assert!(got.finished_at.is_none());
+        assert!(!got.created_at.is_empty());
     }
 }

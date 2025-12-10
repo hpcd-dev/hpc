@@ -107,11 +107,10 @@ impl AgentSvc {
             // After some housekeeping is done - we can finally create SessionManager and add it to
             // the sessionmanager storage
 
-            // TODO: port and identity path should be stored in the database
-            let port = 22;
-            let identity_path = "/Users/alexsizykh/.ssh/id_ed25519".to_string();
+            let port = hr.port;
+            let identity_path = hr.identity_path.clone();
             let connection_addr = match hr.address {
-                crate::state::db::Address::Hostname(hn) => tokio::net::lookup_host((hn.clone(), 0))
+                crate::state::db::Address::Hostname(hn) => tokio::net::lookup_host((hn.clone(), port))
                     .await
                     .map_err(|e| {
                         return AgentSvcError::NetworkError(format!(
@@ -121,7 +120,7 @@ impl AgentSvc {
                             e.to_string()
                         ));
                     })?
-                    .map(|v| std::net::SocketAddr::new(v.ip(), 22))
+                    .map(|v| std::net::SocketAddr::new(v.ip(), port))
                     .next()
                     .ok_or_else(|| {
                         AgentSvcError::NetworkError(format!(
@@ -134,7 +133,7 @@ impl AgentSvc {
             let ssh_params = SshParams {
                 addr: connection_addr,
                 username: hr.username,
-                identity_path: Some(identity_path),
+                identity_path,
                 keepalive_secs: 60,
                 ki_submethods: None,
             };
