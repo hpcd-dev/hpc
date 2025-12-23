@@ -2,9 +2,9 @@ use anyhow::bail;
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use proto::agent_client::AgentClient;
 use proto::{
-    AddClusterInit, AddClusterRequest, ListClustersRequest, ListJobsRequest, ListJobsResponse,
-    LsRequest, LsRequestInit, MfaAnswer, MfaPrompt, PingReply, PingRequest, StreamEvent,
-    SubmitRequest, SubmitRequestInit, add_cluster_init, add_cluster_request, stream_event,
+    AddClusterInit, AddClusterRequest, ListClustersRequest, ListJobsRequest, LsRequest,
+    LsRequestInit, MfaAnswer, MfaPrompt, PingRequest, StreamEvent, SubmitRequest, SubmitRequestInit,
+    add_cluster_init, add_cluster_request, stream_event,
 };
 use serde::Deserialize;
 use std::any::Any;
@@ -34,9 +34,9 @@ enum Cmd {
     Ls(LsArgs),
     Submit(SubmitArgs),
     AddCluster(AddClusterArgs),
-    ListClusters,
     Init(InitProjectArgs),
-    ListJobs(ListJobsArgs),
+    #[command(about = "List jobs or clusters")]
+    List(ListArgs),
 }
 #[derive(clap::ValueEnum, Clone, Default, Debug, serde::Serialize, Deserialize)]
 enum WLM {
@@ -78,10 +78,28 @@ struct InitProjectArgs {
 }
 
 #[derive(Args, Debug)]
+struct ListArgs {
+    /// Resource type to list.
+    #[command(subcommand)]
+    cmd: ListCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum ListCmd {
+    /// List jobs.
+    Jobs(ListJobsArgs),
+    /// List clusters.
+    Clusters(ListClustersArgs),
+}
+
+#[derive(Args, Debug)]
 struct ListJobsArgs {
     #[arg(long)]
     cluster: Option<String>,
 }
+
+#[derive(Args, Debug)]
+struct ListClustersArgs {}
 #[derive(Args, Debug)]
 struct LsArgs {
     hostid: String,
@@ -614,20 +632,26 @@ fn resolve_sbatch_script(local_path: &Path, explicit: Option<&str>) -> anyhow::R
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Ping => match send_ping(&mut client).await {
-            Ok(()) => println!("pong"),
-            Err(e) => bail!(e),
-        },
-        Cmd::Ls(args) => send_ls(&mut client, &args.hostid, &args.path).await?,
+        Cmd::Ping => {
+            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
+            match send_ping(&mut client).await {
+                Ok(()) => println!("pong"),
+                Err(e) => bail!(e),
+            }
+        }
+        Cmd::Ls(args) => {
+            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
+            send_ls(&mut client, &args.hostid, &args.path).await?
+        }
         Cmd::Submit(SubmitArgs {
             hostid,
             local_path,
             remote_path,
             sbatchscript,
         }) => {
+            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
             let local_path_buf = PathBuf::from(&local_path);
             let sbatchscript = resolve_sbatch_script(&local_path_buf, sbatchscript.as_deref())?;
             send_submit(
@@ -640,6 +664,7 @@ async fn main() -> anyhow::Result<()> {
             .await?
         }
         Cmd::AddCluster(add_cluster_args) => {
+            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
             send_add_cluster(
                 &mut client,
                 &add_cluster_args.hostid,
@@ -652,10 +677,15 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
         }
-        Cmd::ListClusters => {
-            send_list_clusters(&mut client, "").await?;
+        Cmd::List(list_args) => {
+            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
+            match list_args.cmd {
+                ListCmd::Clusters(_) => {
+                    send_list_clusters(&mut client, "").await?;
+                }
+                ListCmd::Jobs(args) => send_list_jobs(&mut client, args.cluster).await?,
+            }
         }
-        Cmd::ListJobs(cluster) => send_list_jobs(&mut client, cluster.cluster).await?,
         Cmd::Init(ref args) => run_init_project(args).await?,
     }
     Ok(())
