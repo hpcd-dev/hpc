@@ -1013,6 +1013,47 @@ async fn get_default_base_path(hs: &HostStore, hid: &str) -> Result<String, Stat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::db::NewHost;
+
+    fn make_host(hostid: &str, username: &str, addr: crate::state::db::Address) -> NewHost {
+        NewHost {
+            hostid: hostid.into(),
+            username: username.into(),
+            address: addr,
+            port: 2222,
+            identity_path: Some("/tmp/test_id_ed25519".to_string()),
+            slurm: SlurmVersion {
+                major: 23,
+                minor: 11,
+                patch: 5,
+            },
+            distro: crate::state::db::Distro {
+                name: "ubuntu".into(),
+                version: "22.04".into(),
+            },
+            kernel_version: "6.5.0-41-generic".into(),
+            accounting_available: true,
+            default_base_path: Some("/tmp/runs".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_sessionmanager_uses_stored_port_and_identity() {
+        let hs = HostStore::open_memory().await.unwrap();
+        let addr = crate::state::db::Address::Ip("127.0.0.1".parse().unwrap());
+        let host = make_host("host-a", "alice", addr);
+        hs.insert_host(&host).await.unwrap();
+
+        let svc = AgentSvc::new(hs);
+        let sm = svc.get_sessionmanager("host-a").await.unwrap();
+        let params = sm.test_params();
+        assert_eq!(params.addr.port(), 2222);
+        assert_eq!(
+            params.identity_path.as_deref(),
+            Some("/tmp/test_id_ed25519")
+        );
+        assert_eq!(params.username, "alice");
+    }
 }
 
 fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitResponse {

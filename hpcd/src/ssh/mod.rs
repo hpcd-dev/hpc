@@ -76,6 +76,11 @@ impl SessionManager {
             keepalive_task_handle: Arc::new(Mutex::new(None)),
         }
     }
+
+    #[cfg(test)]
+    pub fn test_params(&self) -> &SshParams {
+        &self.params
+    }
     pub async fn needs_connect(&self) -> bool {
         let handle_field = self.handle.lock().await;
         return match handle_field.as_ref() {
