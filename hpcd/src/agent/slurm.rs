@@ -139,6 +139,105 @@ pub fn parse_job_id(line: &str) -> Option<i64> {
     after_job.trim().parse::<i64>().ok()
 }
 
+pub fn parse_accounting_enabled_from_scontrol(config: &str) -> Option<bool> {
+    for line in config.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("AccountingStorageType") {
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            let lowered = value.to_ascii_lowercase();
+            let enabled = !(lowered == "none" || lowered == "accounting_storage/none");
+            return Some(enabled);
+        }
+    }
+    None
+}
+
+pub fn parse_sacct_states(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let state = line.split('|').next().unwrap_or(line).trim();
+            if state.is_empty() {
+                None
+            } else {
+                Some(state.to_string())
+            }
+        })
+        .collect()
+}
+
+pub fn sacct_output_is_running(output: &str) -> Option<bool> {
+    let states = parse_sacct_states(output);
+    if states.is_empty() {
+        return None;
+    }
+    for state in states {
+        let normalized = normalize_slurm_state(&state);
+        if is_slurm_state_active(&normalized) {
+            return Some(true);
+        }
+        if !is_slurm_state_terminal(&normalized) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+fn normalize_slurm_state(state: &str) -> String {
+    let token = state
+        .split(|c| c == '+' || c == ':' || c == '(')
+        .next()
+        .unwrap_or(state)
+        .trim();
+    token.to_ascii_uppercase()
+}
+
+fn is_slurm_state_active(state: &str) -> bool {
+    matches!(
+        state,
+        "PENDING"
+            | "RUNNING"
+            | "CONFIGURING"
+            | "COMPLETING"
+            | "SUSPENDED"
+            | "RESIZING"
+            | "REQUEUED"
+            | "STAGE_OUT"
+            | "STAGE_IN"
+            | "SIGNALING"
+    )
+}
+
+fn is_slurm_state_terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "COMPLETED"
+            | "CANCELLED"
+            | "FAILED"
+            | "TIMEOUT"
+            | "NODE_FAIL"
+            | "PREEMPTED"
+            | "BOOT_FAIL"
+            | "OUT_OF_MEMORY"
+            | "DEADLINE"
+            | "SPECIAL_EXIT"
+            | "REVOKED"
+    )
+}
+
 // returns a command to be executed on cluster to submit the job
 pub fn path_to_sbatch_command(p: &str, remote_base_path: Option<&str>) -> String {
     if let Some(chdir_path) = remote_base_path {
@@ -251,6 +350,40 @@ PartitionName=gpu_bynode_q5 AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Alloc
                 "CPU=800,Mem=40G,GRES/gpu:nvidia_h200_1g.12gb=1500,GRES/gpu:nvidia_h200_2g.24gb=3000,GRES/gpu:nvidia_h200_3g.36gb=4500,GRES/gpu:h200=11000"
             )
         );
+    }
+
+    #[test]
+    fn parses_accounting_storage_type_from_scontrol_config() {
+        let enabled = r#"
+        AccountingStorageType = accounting_storage/slurmdbd
+        "#;
+        let disabled = "AccountingStorageType=none";
+        assert_eq!(
+            parse_accounting_enabled_from_scontrol(enabled),
+            Some(true)
+        );
+        assert_eq!(
+            parse_accounting_enabled_from_scontrol(disabled),
+            Some(false)
+        );
+        assert_eq!(parse_accounting_enabled_from_scontrol(""), None);
+    }
+
+    #[test]
+    fn sacct_output_detects_running_states() {
+        let output = "RUNNING|\nCOMPLETED|\n";
+        assert_eq!(sacct_output_is_running(output), Some(true));
+    }
+
+    #[test]
+    fn sacct_output_detects_terminal_states() {
+        let output = "COMPLETED|\nFAILED|\n";
+        assert_eq!(sacct_output_is_running(output), Some(false));
+    }
+
+    #[test]
+    fn sacct_output_empty_is_unknown() {
+        assert_eq!(sacct_output_is_running(""), None);
     }
 
     #[test]

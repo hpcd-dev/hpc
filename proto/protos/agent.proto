@@ -81,6 +81,7 @@ message ListClustersUnitResponse {
   }
   bool connected = 6;
   string hostid = 7;
+  bool accounting_available = 8;
 }
 
 

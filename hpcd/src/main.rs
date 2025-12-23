@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 use tonic::transport::Server;
@@ -21,6 +22,8 @@ mod util;
 struct Opts {
     #[arg(short, long)]
     database_path: String,
+    #[arg(long, default_value_t = 5, value_name = "SECONDS")]
+    job_check_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -34,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let server_addr: SocketAddr = "127.0.0.1:50056".parse()?;
 
     let svc = agent::AgentSvc::new(db);
+    svc.spawn_job_checker(Duration::from_secs(opts.job_check_interval_secs));
     println!("server listening on {}", server_addr);
     Server::builder()
         .add_service(AgentServer::new(svc))

@@ -26,6 +26,7 @@ use std::sync::Arc;
 use thiserror::Error as ThisError;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::time::Duration;
 use tokio_stream::Stream;
 use tonic::Status;
 use uuid::Uuid;
@@ -68,6 +69,145 @@ impl AgentSvc {
             mgr: mgr_inner,
             hs: hs_inner,
         }
+    }
+
+    pub fn spawn_job_checker(&self, interval: Duration) {
+        let svc = self.clone();
+        tokio::spawn(async move {
+            svc.run_job_check_loop(interval).await;
+        });
+    }
+
+    async fn run_job_check_loop(self, interval: Duration) {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            if let Err(err) = self.check_running_jobs().await {
+                log::warn!("job check failed: {err}");
+            }
+        }
+    }
+
+    async fn check_running_jobs(&self) -> anyhow::Result<()> {
+        let hs = self.hs.clone().read_owned().await;
+        let jobs = hs.list_running_jobs().await?;
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let hosts = hs.list_hosts(None).await?;
+        drop(hs);
+
+        let mut host_map = HashMap::new();
+        for host in hosts {
+            host_map.insert(host.hostid.clone(), host);
+        }
+
+        let mut jobs_by_host: HashMap<String, Vec<JobRecord>> = HashMap::new();
+        for job in jobs {
+            jobs_by_host
+                .entry(job.host_id.clone())
+                .or_default()
+                .push(job);
+        }
+
+        let mut completed_ids = Vec::new();
+        for (hostid, host_jobs) in jobs_by_host {
+            let Some(host) = host_map.get(&hostid) else {
+                log::warn!("host record missing for running job on '{hostid}'");
+                continue;
+            };
+
+            let sm = match self.get_sessionmanager(&hostid).await {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("failed to get session for {hostid}: {e}");
+                    continue;
+                }
+            };
+
+            if sm.needs_connect().await {
+                let (evt_tx, _evt_rx) =
+                    tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(1);
+                let (mfa_tx, mut mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(1);
+                drop(mfa_tx);
+                if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
+                    log::warn!("failed to connect to {hostid} for job checks: {e}");
+                    continue;
+                }
+            }
+
+            for job in host_jobs {
+                let Some(job_id) = job.job_id else {
+                    log::warn!("job {} has no slurm job id; skipping", job.id);
+                    continue;
+                };
+
+                if host.accounting_available {
+                    let command = format!("sacct -j {job_id} -n -P -o State");
+                    let (out, err, code) = match sm.exec_capture(&command).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::warn!("sacct check failed on {hostid} for {job_id}: {e}");
+                            continue;
+                        }
+                    };
+                    if code != 0 {
+                        log::warn!(
+                            "sacct returned {} on {hostid} for {job_id}: {}",
+                            code,
+                            String::from_utf8_lossy(&err)
+                        );
+                        continue;
+                    }
+                    let output = String::from_utf8_lossy(&out);
+                    let running = match slurm::sacct_output_is_running(&output) {
+                        Some(v) => v,
+                        None => {
+                            log::debug!(
+                                "sacct returned no state for {hostid} job {job_id}"
+                            );
+                            continue;
+                        }
+                    };
+                    if !running {
+                        completed_ids.push(job.id);
+                    }
+                } else {
+                    let command = format!("squeue -j {job_id} -h -o %i");
+                    let (out, err, code) = match sm.exec_capture(&command).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::warn!("squeue check failed on {hostid} for {job_id}: {e}");
+                            continue;
+                        }
+                    };
+                    if code != 0 {
+                        log::warn!(
+                            "squeue returned {} on {hostid} for {job_id}: {}",
+                            code,
+                            String::from_utf8_lossy(&err)
+                        );
+                        continue;
+                    }
+                    let output = String::from_utf8_lossy(&out);
+                    if output.trim().is_empty() {
+                        completed_ids.push(job.id);
+                    }
+                }
+            }
+        }
+
+        if completed_ids.is_empty() {
+            return Ok(());
+        }
+
+        let hs = self.hs.clone().write_owned().await;
+        for id in completed_ids {
+            if let Err(e) = hs.mark_job_completed(id).await {
+                log::warn!("failed to mark job {id} completed: {e}");
+            }
+        }
+        Ok(())
     }
     /// Test if SessionManager object for hostid exists in the in-memory mapping
     async fn sessionmanager_exists(&self, hostid: &str) -> bool {
@@ -881,19 +1021,35 @@ impl Agent for AgentSvc {
                     return;
                 }
             };
-            let (_, err, code) = match sm.exec_capture("sacct 1>/dev/null 2>&1").await {
+            let (out, err, code) = match sm.exec_capture("scontrol show config").await {
                 Ok((vo, ve, ec)) => (vo, ve, ec),
                 Err(e) => {
                     let _ = evt_tx
                         .send(Err(Status::aborted(format!(
-                            "failed to gather cluster os metadata for {hostid}: {}",
+                            "failed to gather cluster config for {hostid}: {}",
                             e.to_string()
                         ))))
                         .await;
                     return;
                 }
             };
-            let accounting_enabled = matches!(code, 0);
+            if code != 0 {
+                let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to run `scontrol show config` on {hostid}: {}",
+                        String::from_utf8_lossy(&err)
+                    ))))
+                    .await;
+                return;
+            }
+            let config = String::from_utf8_lossy(&out);
+            let accounting_enabled = slurm::parse_accounting_enabled_from_scontrol(&config)
+                .unwrap_or_else(|| {
+                    log::warn!(
+                        "unable to determine accounting storage type for {hostid}, assuming disabled"
+                    );
+                    false
+                });
 
             let normalized_default_base_path =
                 default_base_path.map(|v| normalize_path(v).to_owned());
@@ -1100,6 +1256,7 @@ fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitRespo
         port: hs.port as i32,
         connected: false,
         hostid: hs.hostid.to_owned(),
+        accounting_available: hs.accounting_available,
     };
     return rp;
 }

@@ -452,8 +452,10 @@ impl HostStore {
               kernel_version = ?10,
               updated_at = ?11,
               port = ?12,
-              identity_path = ?13
-            WHERE id = ?14
+              identity_path = ?13,
+              accounting_available = ?14,
+              default_base_path = ?15
+            WHERE id = ?16
             "#,
         )
         .bind(&host.hostid)
@@ -469,6 +471,8 @@ impl HostStore {
         .bind(now)
         .bind(&host.port)
         .bind(&host.identity_path)
+        .bind(host.accounting_available)
+        .bind(&host.default_base_path)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -742,6 +746,38 @@ impl HostStore {
         .await?;
         Ok(rows.into_iter().map(row_to_job).collect())
     }
+
+    pub async fn list_running_jobs(&self) -> Result<Vec<JobRecord>> {
+        let rows = sqlx::query(
+            r#"
+            select aj.id as id, aj.job_id as job_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            from jobs aj
+            join hosts h
+              on aj.host_id = h.id
+            where aj.is_completed = 0;
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_job).collect())
+    }
+
+    pub async fn mark_job_completed(&self, id: i64) -> Result<()> {
+        let now = now_rfc3339();
+        sqlx::query(
+            r#"
+            update jobs
+            set is_completed = 1,
+                completed_at = ?1
+            where id = ?2
+            "#,
+        )
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 // -- helpers
@@ -767,6 +803,10 @@ fn row_to_host(row: sqlx::sqlite::SqliteRow) -> HostRecord {
         Address::Hostname("<unknown>".into())
     };
 
+    let accounting_available = row
+        .try_get::<i64, _>("accounting_available")
+        .unwrap_or(0)
+        != 0;
     HostRecord {
         id: row.try_get("id").unwrap(),
         hostid: row.try_get("hostid").unwrap(),
@@ -786,7 +826,7 @@ fn row_to_host(row: sqlx::sqlite::SqliteRow) -> HostRecord {
         updated_at: row.try_get("updated_at").unwrap(),
         port: row.try_get("port").unwrap(),
         identity_path: row.try_get("identity_path").unwrap(),
-        accounting_available: row.try_get("accounting_available").unwrap(),
+        accounting_available,
         default_base_path: row.try_get("default_base_path").unwrap(),
     }
 }
@@ -1085,5 +1125,39 @@ mod tests {
         assert!(!got.is_completed);
         assert!(got.finished_at.is_none());
         assert!(!got.created_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_running_jobs_skips_completed_jobs() {
+        let db = HostStore::open_memory().await.unwrap();
+        let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
+        db.insert_host(&host).await.unwrap();
+
+        let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
+        let job1 = NewJob {
+            job_id: Some(101),
+            host_id: host_row.id,
+            local_path: "/tmp/local1".into(),
+            remote_path: "/remote/run1".into(),
+        };
+        let job2 = NewJob {
+            job_id: Some(102),
+            host_id: host_row.id,
+            local_path: "/tmp/local2".into(),
+            remote_path: "/remote/run2".into(),
+        };
+        let job1_id = db.insert_job(&job1).await.unwrap();
+        let job2_id = db.insert_job(&job2).await.unwrap();
+
+        db.mark_job_completed(job1_id).await.unwrap();
+
+        let running = db.list_running_jobs().await.unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].id, job2_id);
+
+        let all = db.list_all_jobs().await.unwrap();
+        let completed = all.iter().find(|j| j.id == job1_id).unwrap();
+        assert!(completed.is_completed);
+        assert!(completed.finished_at.is_some());
     }
 }

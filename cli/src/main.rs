@@ -269,6 +269,7 @@ fn cluster_to_json(item: &ListClustersUnitResponse) -> serde_json::Value {
         "connected": item.connected,
         "status": status,
         "identity_path": item.identity_path.as_deref(),
+        "accounting_available": item.accounting_available,
     })
 }
 
@@ -294,12 +295,13 @@ fn emit_json(value: serde_json::Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn str_width(value: &str) -> usize {
+    value.chars().count()
+}
+
 fn print_clusters_table(clusters: &[ListClustersUnitResponse]) {
-    // TODO: go through list of clusters to determine the lengths of fields
-    println!(
-        "{:<12} {:<16} {:<20} {:<4} {:<12}",
-        "username", "hostid", "address", "port", "status"
-    );
+    let headers = ["username", "hostid", "address", "port", "status", "accounting"];
+    let mut rows: Vec<(String, String, String, String, String, String)> = Vec::new();
 
     for item in clusters.iter() {
         let host_str = cluster_host_string(item);
@@ -307,9 +309,68 @@ fn print_clusters_table(clusters: &[ListClustersUnitResponse]) {
             true => "connected",
             false => "disconnected",
         };
+        let accounting_str = match item.accounting_available {
+            true => "enabled",
+            false => "disabled",
+        };
+        rows.push((
+            item.username.clone(),
+            item.hostid.clone(),
+            host_str,
+            item.port.to_string(),
+            connected_str.to_string(),
+            accounting_str.to_string(),
+        ));
+    }
+
+    let mut widths: [usize; 6] = [
+        str_width(headers[0]),
+        str_width(headers[1]),
+        str_width(headers[2]),
+        str_width(headers[3]),
+        str_width(headers[4]),
+        str_width(headers[5]),
+    ];
+    for row in rows.iter() {
+        widths[0] = widths[0].max(str_width(&row.0));
+        widths[1] = widths[1].max(str_width(&row.1));
+        widths[2] = widths[2].max(str_width(&row.2));
+        widths[3] = widths[3].max(str_width(&row.3));
+        widths[4] = widths[4].max(str_width(&row.4));
+        widths[5] = widths[5].max(str_width(&row.5));
+    }
+
+    println!(
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        headers[4],
+        headers[5],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3],
+        w4 = widths[4],
+        w5 = widths[5]
+    );
+
+    for row in rows {
         println!(
-            "{:<12} {:<16} {:<20} {:<4} {:<12}",
-            item.username, item.hostid, host_str, item.port, connected_str
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}",
+            row.0,
+            row.1,
+            row.2,
+            row.3,
+            row.4,
+            row.5,
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+            w4 = widths[4],
+            w5 = widths[5]
         );
     }
 }
@@ -325,11 +386,16 @@ fn print_cluster_details(item: &ListClustersUnitResponse) {
         true => "connected",
         false => "disconnected",
     };
+    let accounting_str = match item.accounting_available {
+        true => "enabled",
+        false => "disabled",
+    };
     println!("hostid: {}", item.hostid);
     println!("username: {}", item.username);
     println!("address: {}", host_str);
     println!("port: {}", item.port);
     println!("status: {}", connected_str);
+    println!("accounting: {}", accounting_str);
     println!(
         "identity_path: {}",
         item.identity_path.as_deref().unwrap_or("-")
@@ -371,11 +437,8 @@ async fn fetch_list_jobs(
 }
 
 fn print_jobs_table(jobs: &[ListJobsUnitResponse]) {
-    // TODO: go through list of clusters to determine the lengths of fields
-    println!(
-        "{:<12} {:<16} {:<9} {:<20} {:<20}",
-        "job id", "host id", "status", "created", "finished"
-    );
+    let headers = ["job id", "host id", "status", "created", "finished"];
+    let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
 
     for item in jobs.iter() {
         let job_id = item
@@ -387,9 +450,57 @@ fn print_jobs_table(jobs: &[ListJobsUnitResponse]) {
             false => "running",
         };
         let finished_at = item.finished_at.clone().unwrap_or_else(|| "-".to_string());
+        rows.push((
+            job_id,
+            item.hostid.clone(),
+            completed_str.to_string(),
+            item.created_at.clone(),
+            finished_at,
+        ));
+    }
+
+    let mut widths: [usize; 5] = [
+        str_width(headers[0]),
+        str_width(headers[1]),
+        str_width(headers[2]),
+        str_width(headers[3]),
+        str_width(headers[4]),
+    ];
+    for row in rows.iter() {
+        widths[0] = widths[0].max(str_width(&row.0));
+        widths[1] = widths[1].max(str_width(&row.1));
+        widths[2] = widths[2].max(str_width(&row.2));
+        widths[3] = widths[3].max(str_width(&row.3));
+        widths[4] = widths[4].max(str_width(&row.4));
+    }
+
+    println!(
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        headers[4],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3],
+        w4 = widths[4]
+    );
+
+    for row in rows {
         println!(
-            "{:<12} {:<16} {:<9} {:<20} {:<20}",
-            job_id, item.hostid, completed_str, item.created_at, finished_at
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}",
+            row.0,
+            row.1,
+            row.2,
+            row.3,
+            row.4,
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+            w4 = widths[4]
         );
     }
 }
