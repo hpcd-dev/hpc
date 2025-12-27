@@ -716,11 +716,33 @@ impl Agent for AgentSvc {
                 }
             };
 
+            let err_message = String::from_utf8_lossy(&err);
             log::debug!(
                 "submitted remote script, received from sbatch code {}, error message: {}",
                 code,
-                String::from_utf8(err).unwrap()
+                err_message
             );
+            if code != 0 {
+                let out_message = String::from_utf8_lossy(&out);
+                let detail = if err_message.trim().is_empty() {
+                    if out_message.trim().is_empty() {
+                        "no error output from sbatch"
+                    } else {
+                        out_message.trim()
+                    }
+                } else {
+                    err_message.trim()
+                };
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(format!(
+                            "sbatch failed with exit code {}: {}",
+                            code, detail
+                        ))),
+                    }))
+                    .await;
+                return;
+            }
             let outString = String::from_utf8_lossy(&out);
             let jobId = slurm::parse_job_id(&outString);
 
