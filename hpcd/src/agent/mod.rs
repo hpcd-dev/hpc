@@ -1,4 +1,6 @@
 use crate::ssh::SessionManager;
+use crate::ssh::SyncFilterAction;
+use crate::ssh::SyncFilterRule;
 use crate::ssh::SshParams;
 use crate::ssh::receiver_to_stream;
 use crate::ssh::sh_escape;
@@ -17,8 +19,8 @@ use proto::agent_server::{Agent, AgentServer};
 use proto::list_clusters_unit_response;
 use proto::{
     AddClusterRequest, ListJobsRequest, ListJobsResponse, ListJobsUnitResponse, LsRequest,
-    LsRequestInit, MfaAnswer, PingReply, PingRequest, StreamEvent, SubmitRequest, SubmitStatus,
-    stream_event, submit_status,
+    LsRequestInit, MfaAnswer, PingReply, PingRequest, StreamEvent, SubmitPathFilterAction,
+    SubmitPathFilterRule, SubmitRequest, SubmitStatus, stream_event, submit_status,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -478,12 +480,19 @@ impl Agent for AgentSvc {
             .map_err(|e| Status::unknown(format!("read error: {e}")))?
             .ok_or_else(|| Status::invalid_argument("stream closed before init"))?;
 
-        let (local_path, remote_path, hostid, sbatchscript) = match init.msg {
+        let (local_path, remote_path, hostid, sbatchscript, filters) = match init.msg {
             Some(proto::submit_request::Msg::Init(i)) => {
-                (i.local_path, i.remote_path, i.hostid, i.sbatchscript)
+                (
+                    i.local_path,
+                    i.remote_path,
+                    i.hostid,
+                    i.sbatchscript,
+                    i.filters,
+                )
             }
             _ => return Err(Status::invalid_argument("first message must be init(path)")),
         };
+        let filters = build_sync_filters(filters)?;
 
         // Establish communication queues
         let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
@@ -651,6 +660,7 @@ impl Agent for AgentSvc {
                     &remote_path,
                     Some(1024 * 1024), // TODO: this should be adjustable, and done per-file. Probably sqrt(file size in bytes) will be a good start.
                     None,
+                    &filters,
                     &evt_tx,
                     mfa_rx,
                 ) => res,
@@ -1255,6 +1265,33 @@ impl Agent for AgentSvc {
             .collect();
         return Ok(tonic::Response::new(ListJobsResponse { jobs: api_jobs }));
     }
+}
+
+fn build_sync_filters(
+    filters: Vec<SubmitPathFilterRule>,
+) -> Result<Vec<SyncFilterRule>, Status> {
+    let mut out = Vec::with_capacity(filters.len());
+    for rule in filters {
+        let action = match SubmitPathFilterAction::from_i32(rule.action) {
+            Some(SubmitPathFilterAction::Include) => SyncFilterAction::Include,
+            Some(SubmitPathFilterAction::Exclude) => SyncFilterAction::Exclude,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "submit filter action must be include or exclude",
+                ));
+            }
+        };
+        if rule.pattern.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "submit filter pattern cannot be empty",
+            ));
+        }
+        out.push(SyncFilterRule {
+            action,
+            pattern: rule.pattern,
+        });
+    }
+    Ok(out)
 }
 
 async fn get_default_base_path(hs: &HostStore, hid: &str) -> Result<String, Status> {

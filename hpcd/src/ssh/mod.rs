@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use blake3::Hasher as Blake3;
 use futures::stream::StreamExt;
+use globset::{GlobBuilder, GlobMatcher};
 use log;
-use pathdiff::diff_paths;
 use proto::{MfaAnswer, MfaPrompt, Prompt, StreamEvent, stream_event};
 use rand::{Rng, distr::Alphanumeric};
 use russh::ChannelMsg;
@@ -49,6 +49,130 @@ pub struct SshParams {
     pub ki_submethods: Option<String>,
     /// Send TCP keepalives to keep long connections healthy.
     pub keepalive_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SyncFilterAction {
+    Include,
+    Exclude,
+}
+
+#[derive(Clone, Debug)]
+pub struct SyncFilterRule {
+    pub action: SyncFilterAction,
+    pub pattern: String,
+}
+
+#[derive(Debug)]
+struct CompiledFilterRule {
+    action: SyncFilterAction,
+    matcher: GlobMatcher,
+    only_dir: bool,
+    match_basename: bool,
+}
+
+#[derive(Debug)]
+struct PathFilter {
+    rules: Vec<CompiledFilterRule>,
+}
+
+impl PathFilter {
+    fn new(rules: &[SyncFilterRule]) -> Result<Self> {
+        let mut compiled = Vec::with_capacity(rules.len());
+        for rule in rules {
+            compiled.push(CompiledFilterRule::compile(rule)?);
+        }
+        Ok(Self { rules: compiled })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    fn should_include(&self, rel_path: &Path, is_dir: bool) -> bool {
+        if self.rules.is_empty() {
+            return true;
+        }
+        let rel_str = rel_path_to_slash(rel_path);
+        let basename = rel_path
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        for rule in &self.rules {
+            if rule.matches(&rel_str, &basename, is_dir) {
+                return matches!(rule.action, SyncFilterAction::Include);
+            }
+        }
+        true
+    }
+}
+
+impl CompiledFilterRule {
+    fn compile(rule: &SyncFilterRule) -> Result<Self> {
+        let mut pattern = rule.pattern.trim().to_string();
+        if pattern.is_empty() {
+            anyhow::bail!("filter pattern cannot be empty");
+        }
+
+        let mut only_dir = false;
+        if pattern.ends_with('/') {
+            only_dir = true;
+            while pattern.ends_with('/') {
+                pattern.pop();
+            }
+        }
+        if pattern.is_empty() {
+            anyhow::bail!("filter pattern cannot be empty");
+        }
+
+        let anchored = pattern.starts_with('/');
+        if anchored {
+            pattern = pattern.trim_start_matches('/').to_string();
+        }
+
+        let has_slash = pattern.contains('/');
+        let match_basename = !has_slash && !anchored;
+        if has_slash && !anchored && !pattern.starts_with("**/") {
+            pattern = format!("**/{}", pattern);
+        }
+
+        let mut builder = GlobBuilder::new(&pattern);
+        builder.literal_separator(true);
+        let matcher = builder
+            .build()
+            .with_context(|| format!("invalid filter pattern '{}'", rule.pattern))?
+            .compile_matcher();
+        Ok(Self {
+            action: rule.action,
+            matcher,
+            only_dir,
+            match_basename,
+        })
+    }
+
+    fn matches(&self, rel_path: &str, basename: &str, is_dir: bool) -> bool {
+        if self.only_dir && !is_dir {
+            return false;
+        }
+        if self.match_basename {
+            self.matcher.is_match(basename)
+        } else {
+            self.matcher.is_match(rel_path)
+        }
+    }
+}
+
+fn rel_path_to_slash(path: &Path) -> String {
+    let mut out = String::new();
+    for comp in path.components() {
+        if let std::path::Component::Normal(os) = comp {
+            if !out.is_empty() {
+                out.push('/');
+            }
+            out.push_str(&os.to_string_lossy());
+        }
+    }
+    out
 }
 
 /// Manager that owns a single long-lived SSH connection.
@@ -774,6 +898,7 @@ sys.stdout.flush()
         remote_dir: &str,
         block_size: Option<usize>,
         parallelism: Option<usize>,
+        filters: &[SyncFilterRule],
         evt_tx: &mpsc::Sender<Result<StreamEvent, tonic::Status>>,
         mut mfa_rx: mpsc::Receiver<MfaAnswer>,
     ) -> Result<()> {
@@ -788,6 +913,8 @@ sys.stdout.flush()
 
         self.ensure_connected(evt_tx, &mut mfa_rx).await?;
         let local_dir = local_dir.as_ref().canonicalize()?;
+        let path_filter = PathFilter::new(filters)?;
+        let use_filter = !path_filter.is_empty();
 
         let sftp = self.sftp().await?;
         log::info!("making sure the remote directory exists");
@@ -806,6 +933,18 @@ sys.stdout.flush()
         for entry in WalkDir::new(&local_dir)
             .follow_links(follow_links)
             .into_iter()
+            .filter_entry(|entry| {
+                if !use_filter || entry.depth() == 0 {
+                    return true;
+                }
+                if !entry.file_type().is_dir() {
+                    return true;
+                }
+                match entry.path().strip_prefix(&local_dir) {
+                    Ok(rel) => path_filter.should_include(rel, true),
+                    Err(_) => true,
+                }
+            })
         {
             let direntry = match entry {
                 Ok(v) => v,
@@ -823,8 +962,20 @@ sys.stdout.flush()
                 continue;
             }
             let path_local = direntry.path().to_path_buf();
-            let rel = diff_paths(&path_local, &local_dir)
-                .ok_or_else(|| anyhow!("failed computing relative path for {:?}", path_local))?;
+            let rel = match path_local.strip_prefix(&local_dir) {
+                Ok(v) => v.to_path_buf(),
+                Err(_) => {
+                    log::warn!(
+                        "failed computing relative path for {:?} from {:?}",
+                        path_local,
+                        local_dir
+                    );
+                    continue;
+                }
+            };
+            if use_filter && !path_filter.should_include(&rel, false) {
+                continue;
+            }
             let remote_path = join_remote(remote_dir, &rel);
             if let Some(parent_rel) = rel.parent() {
                 let remote_parent = join_remote(remote_dir, parent_rel);
@@ -986,4 +1137,68 @@ async fn upload_single_file(
     }
     rfile.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PathFilter, SyncFilterAction, SyncFilterRule};
+    use std::path::Path;
+
+    fn rule(action: SyncFilterAction, pattern: &str) -> SyncFilterRule {
+        SyncFilterRule {
+            action,
+            pattern: pattern.to_string(),
+        }
+    }
+
+    #[test]
+    fn filter_order_first_match_wins() {
+        let filter = PathFilter::new(&[
+            rule(SyncFilterAction::Include, "*.rs"),
+            rule(SyncFilterAction::Exclude, "*"),
+        ])
+        .unwrap();
+        assert!(filter.should_include(Path::new("src/lib.rs"), false));
+        assert!(!filter.should_include(Path::new("Cargo.toml"), false));
+
+        let filter = PathFilter::new(&[
+            rule(SyncFilterAction::Exclude, "*.rs"),
+            rule(SyncFilterAction::Include, "*.rs"),
+        ])
+        .unwrap();
+        assert!(!filter.should_include(Path::new("src/lib.rs"), false));
+    }
+
+    #[test]
+    fn filter_matches_basename_and_paths() {
+        let filter = PathFilter::new(&[
+            rule(SyncFilterAction::Include, "src/*.rs"),
+            rule(SyncFilterAction::Exclude, "*"),
+        ])
+        .unwrap();
+        assert!(filter.should_include(Path::new("src/lib.rs"), false));
+        assert!(!filter.should_include(Path::new("lib.rs"), false));
+
+        let filter = PathFilter::new(&[
+            rule(SyncFilterAction::Include, "*.rs"),
+            rule(SyncFilterAction::Exclude, "*"),
+        ])
+        .unwrap();
+        assert!(filter.should_include(Path::new("src/lib.rs"), false));
+    }
+
+    #[test]
+    fn filter_respects_anchor_and_directory_only() {
+        let filter = PathFilter::new(&[
+            rule(SyncFilterAction::Include, "/src/*.rs"),
+            rule(SyncFilterAction::Exclude, "*"),
+        ])
+        .unwrap();
+        assert!(filter.should_include(Path::new("src/lib.rs"), false));
+        assert!(!filter.should_include(Path::new("foo/src/lib.rs"), false));
+
+        let filter = PathFilter::new(&[rule(SyncFilterAction::Exclude, "target/")]).unwrap();
+        assert!(!filter.should_include(Path::new("target"), true));
+        assert!(filter.should_include(Path::new("target"), false));
+    }
 }

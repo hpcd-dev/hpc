@@ -1,5 +1,5 @@
 use anyhow::bail;
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode},
@@ -12,8 +12,9 @@ use proto::agent_client::AgentClient;
 use proto::{
     AddClusterInit, AddClusterRequest, ListClustersRequest, ListClustersResponse,
     ListClustersUnitResponse, ListJobsRequest, ListJobsResponse, ListJobsUnitResponse, LsRequest,
-    LsRequestInit, MfaAnswer, MfaPrompt, PingRequest, StreamEvent, SubmitRequest, SubmitRequestInit,
-    add_cluster_init, add_cluster_request, stream_event, submit_status,
+    LsRequestInit, MfaAnswer, MfaPrompt, PingRequest, StreamEvent, SubmitPathFilterAction,
+    SubmitPathFilterRule, SubmitRequest, add_cluster_init, add_cluster_request, stream_event,
+    submit_status,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -160,6 +161,26 @@ struct SubmitArgs {
     headless: bool,
     #[arg(long)]
     remote_path: Option<String>,
+    /// Include paths matching PATTERN.
+    /// Rules are checked in the order they appear across --include/--exclude;
+    /// the first match wins, and unmatched paths are included.
+    /// Patterns match the path relative to the submit root with '/' separators.
+    /// A pattern without '/' matches the basename anywhere; a pattern with '/'
+    /// but no leading '/' is treated as `**/PATTERN`.
+    /// A leading '/' anchors to the root, and a trailing '/' matches directories
+    /// only (and prunes their contents). Globs support `*`, `?`, `**`, `[]`, `{}`.
+    #[arg(long, value_name = "PATTERN", action = clap::ArgAction::Append)]
+    include: Vec<String>,
+    /// Exclude paths matching PATTERN.
+    /// Rules are checked in the order they appear across --include/--exclude;
+    /// the first match wins, and unmatched paths are included.
+    /// Patterns match the path relative to the submit root with '/' separators.
+    /// A pattern without '/' matches the basename anywhere; a pattern with '/'
+    /// but no leading '/' is treated as `**/PATTERN`.
+    /// A leading '/' anchors to the root, and a trailing '/' matches directories
+    /// only (and prunes their contents). Globs support `*`, `?`, `**`, `[]`, `{}`.
+    #[arg(long, value_name = "PATTERN", action = clap::ArgAction::Append)]
+    exclude: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -820,12 +841,46 @@ async fn send_ls(
     ensure_exit_code(exit_code, "received exit code")
 }
 
+fn submit_filters_from_matches(matches: &clap::ArgMatches) -> Vec<SubmitPathFilterRule> {
+    let Some(("submit", sub_matches)) = matches.subcommand() else {
+        return Vec::new();
+    };
+
+    let mut ordered: Vec<(usize, SubmitPathFilterAction, String)> = Vec::new();
+    let mut push_rules = |arg: &str, action: SubmitPathFilterAction| {
+        let values: Vec<String> = sub_matches
+            .get_many::<String>(arg)
+            .map(|vals| vals.map(|v| v.to_string()).collect())
+            .unwrap_or_default();
+        let indices: Vec<usize> = sub_matches
+            .indices_of(arg)
+            .map(|vals| vals.collect())
+            .unwrap_or_default();
+        for (idx, pattern) in indices.into_iter().zip(values.into_iter()) {
+            ordered.push((idx, action, pattern));
+        }
+    };
+
+    push_rules("include", SubmitPathFilterAction::Include);
+    push_rules("exclude", SubmitPathFilterAction::Exclude);
+
+    ordered.sort_by_key(|(idx, _, _)| *idx);
+    ordered
+        .into_iter()
+        .map(|(_, action, pattern)| SubmitPathFilterRule {
+            action: action as i32,
+            pattern,
+        })
+        .collect()
+}
+
 async fn send_submit(
     client: &mut AgentClient<Channel>,
     hostid: &str,
     local_path: &str,
     remote_path: &Option<String>,
     sbatchscript: &str,
+    filters: &[SubmitPathFilterRule],
 ) -> anyhow::Result<()> {
     println!("Submitting job");
     println!("  hostid: {hostid}");
@@ -839,6 +894,7 @@ async fn send_submit(
                 remote_path: remote_path.to_owned(),
                 hostid: hostid.to_owned(),
                 sbatchscript: sbatchscript.to_owned(),
+                filters: filters.to_vec(),
             })),
         })
         .await?;
@@ -1181,7 +1237,9 @@ fn resolve_sbatch_script(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    let submit_filters = submit_filters_from_matches(&matches);
     match cli.cmd {
         Cmd::Ping => {
             let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
@@ -1200,6 +1258,7 @@ async fn main() -> anyhow::Result<()> {
             remote_path,
             sbatchscript,
             headless,
+            ..
         }) => {
             let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
             let local_path_buf = PathBuf::from(&local_path);
@@ -1211,6 +1270,7 @@ async fn main() -> anyhow::Result<()> {
                 &local_path,
                 &remote_path,
                 &sbatchscript,
+                &submit_filters,
             )
             .await?
         }
