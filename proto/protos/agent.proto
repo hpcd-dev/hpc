@@ -57,6 +57,20 @@ message LsRequest {
   }
 }
 
+message RetrieveJobRequestInit {
+  int64 job_id = 1;        // job id returned by the scheduler
+  optional string hostid = 2; // optional host identifier to disambiguate
+  string path = 3;         // remote path (absolute or relative to run folder)
+  optional string local_path = 4; // local destination base path
+}
+
+message RetrieveJobRequest {
+  oneof msg {
+    RetrieveJobRequestInit init = 1;
+    MfaAnswer mfa = 2;
+  }
+}
+
 
 
 
@@ -158,6 +172,7 @@ message PingReply { string message = 1; }
 service Agent {
   rpc Ping(PingRequest) returns (PingReply);
   rpc Ls(stream LsRequest) returns (stream StreamEvent);
+  rpc RetrieveJob(stream RetrieveJobRequest) returns (stream StreamEvent);
   rpc Submit(stream SubmitRequest) returns (stream StreamEvent);
   rpc AddCluster(stream AddClusterRequest) returns (stream StreamEvent);
   rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);

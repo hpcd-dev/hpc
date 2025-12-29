@@ -19,8 +19,9 @@ use proto::agent_server::{Agent, AgentServer};
 use proto::list_clusters_unit_response;
 use proto::{
     AddClusterRequest, ListJobsRequest, ListJobsResponse, ListJobsUnitResponse, LsRequest,
-    LsRequestInit, MfaAnswer, PingReply, PingRequest, StreamEvent, SubmitPathFilterAction,
-    SubmitPathFilterRule, SubmitRequest, SubmitStatus, stream_event, submit_status,
+    LsRequestInit, MfaAnswer, PingReply, PingRequest, RetrieveJobRequest, RetrieveJobRequestInit,
+    StreamEvent, SubmitPathFilterAction, SubmitPathFilterRule, SubmitRequest, SubmitStatus,
+    stream_event, submit_status,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -340,6 +341,7 @@ impl AgentSvc {
 #[tonic::async_trait]
 impl Agent for AgentSvc {
     type LsStream = OutStream;
+    type RetrieveJobStream = OutStream;
     type SubmitStream = OutStream;
     type AddClusterStream = OutStream;
     async fn ping(
@@ -416,6 +418,193 @@ impl Agent for AgentSvc {
 
         let command = format!("ls -- {}", sh_escape(&list_path));
         self.run_command(command, &hostid, mfa_rx).await
+    }
+    async fn retrieve_job(
+        &self,
+        request: tonic::Request<tonic::Streaming<RetrieveJobRequest>>,
+    ) -> Result<tonic::Response<Self::RetrieveJobStream>, Status> {
+        let mut inbound = request.into_inner();
+
+        let init = inbound
+            .message()
+            .await
+            .map_err(|e| Status::unknown(format!("read error: {e}")))?
+            .ok_or_else(|| Status::invalid_argument("stream closed before init"))?;
+
+        let (job_id, hostid, path, local_path) = match init.msg {
+            Some(proto::retrieve_job_request::Msg::Init(RetrieveJobRequestInit {
+                job_id,
+                hostid,
+                path,
+                local_path,
+            })) => (job_id, hostid, path, local_path),
+            _ => {
+                return Err(Status::invalid_argument(
+                    "first message must be init(job_id, hostid, path, local_path)",
+                ));
+            }
+        };
+
+        if path.trim().is_empty() {
+            return Err(Status::invalid_argument("path can't be empty"));
+        }
+        let local_path = match local_path {
+            Some(v) if !v.trim().is_empty() => v,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "local_path can't be empty for retrieve",
+                ));
+            }
+        };
+
+        let (mfa_tx, mut mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(16);
+        tokio::spawn(async move {
+            while let Ok(Some(item)) = inbound.message().await {
+                if let Some(proto::retrieve_job_request::Msg::Mfa(ans)) = item.msg {
+                    if mfa_tx.send(ans).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
+        let hs = self.hs.clone();
+        let path_is_absolute = std::path::PathBuf::from(&path).is_absolute();
+        let svc = self.clone();
+
+        tokio::spawn(async move {
+            let (hostid, run_path) = {
+                let hs = hs.read_owned().await;
+                let jobs = match hs.list_jobs_by_job_id(job_id, hostid.as_deref()).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(format!(
+                                    "could not fetch job {job_id}: {e}",
+                                ))),
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+                let job = match jobs.as_slice() {
+                    [] => {
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(format!(
+                                    "job {job_id} not found",
+                                ))),
+                            }))
+                            .await;
+                        return;
+                    }
+                    [job] => job,
+                    _ => {
+                        let message = if let Some(hostid) = hostid.as_deref() {
+                            format!("multiple jobs matched job id {job_id} in {hostid}")
+                        } else {
+                            format!("job id {job_id} matched multiple clusters; use --cluster")
+                        };
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(message)),
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+                (job.host_id.clone(), job.remote_path.clone())
+            };
+
+            let mgr = match svc.get_sessionmanager(&hostid).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let message = match e {
+                        AgentSvcError::UnknownHostId => format!("unknown hostid {hostid}"),
+                        AgentSvcError::NetworkError(e) => format!("network error: {e}"),
+                        other_error => {
+                            format!("unexpected error: {}", other_error.to_string())
+                        }
+                    };
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(message)),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+
+            if let Err(err) = mgr.ensure_connected(&evt_tx, &mut mfa_rx).await {
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(err.to_string())),
+                    }))
+                    .await;
+                return;
+            }
+
+            let remote_path = if path_is_absolute {
+                normalize_path(&path).to_string_lossy().into_owned()
+            } else {
+                util::remote_path::resolve_relative(&run_path, &path)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+
+            let mut local_base = std::path::PathBuf::from(local_path);
+            if !local_base.is_absolute() {
+                match std::env::current_dir() {
+                    Ok(cwd) => local_base = cwd.join(local_base),
+                    Err(e) => {
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(format!(
+                                    "could not resolve local destination: {e}",
+                                ))),
+                            }))
+                            .await;
+                        return;
+                    }
+                }
+            }
+
+            let local_target = if path_is_absolute {
+                let Some(name) = std::path::Path::new(&remote_path).file_name() else {
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                "remote path has no basename".to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                };
+                local_base.join(name)
+            } else {
+                local_base.join(std::path::Path::new(&path))
+            };
+
+            if let Err(err) = mgr.retrieve_path(&remote_path, &local_target).await {
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(err.to_string())),
+                    }))
+                    .await;
+                return;
+            }
+
+            let _ = evt_tx
+                .send(Ok(StreamEvent {
+                    event: Some(stream_event::Event::ExitCode(0)),
+                }))
+                .await;
+        });
+
+        let out: OutStream = Box::pin(receiver_to_stream(evt_rx));
+        Ok(tonic::Response::new(out))
     }
     async fn list_clusters(
         &self,

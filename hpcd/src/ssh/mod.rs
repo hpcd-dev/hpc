@@ -1018,6 +1018,15 @@ sys.stdout.flush()
         }
         Ok(())
     }
+    pub async fn retrieve_path(&self, remote_path: &str, local_path: &Path) -> Result<()> {
+        let sftp = self.sftp().await?;
+        let meta = sftp.metadata(remote_path).await?;
+        if meta.is_dir() {
+            download_dir(&sftp, remote_path, local_path).await
+        } else {
+            download_file(&sftp, remote_path, local_path).await
+        }
+    }
     pub async fn directory_exists(&self, dirname: &str) -> Result<bool, String> {
         let command = format!("ls {} 1>&2 2>/dev/null", dirname);
         let (_, _, code) = match self.exec_capture(&command).await {
@@ -1136,6 +1145,39 @@ async fn upload_single_file(
         offset += n as u64;
     }
     rfile.flush().await?;
+    Ok(())
+}
+
+async fn download_file(sftp: &SftpSession, remote_path: &str, local_path: &Path) -> Result<()> {
+    if let Some(parent) = local_path.parent() {
+        tokiofs::create_dir_all(parent).await?;
+    }
+    let mut rfile = sftp.open(remote_path).await?;
+    let mut lfile = tokiofs::File::create(local_path).await?;
+    tokio::io::copy(&mut rfile, &mut lfile).await?;
+    lfile.flush().await?;
+    Ok(())
+}
+
+async fn download_dir(sftp: &SftpSession, remote_dir: &str, local_dir: &Path) -> Result<()> {
+    let mut stack: Vec<(String, PathBuf)> =
+        vec![(remote_dir.trim_end_matches('/').to_string(), local_dir.to_path_buf())];
+
+    while let Some((remote_base, local_base)) = stack.pop() {
+        tokiofs::create_dir_all(&local_base).await?;
+        let entries = sftp.read_dir(&remote_base).await?;
+        for entry in entries {
+            let name = entry.file_name();
+            let remote_child = format!("{}/{}", remote_base, name);
+            let local_child = local_base.join(&name);
+            let meta = entry.metadata();
+            if meta.is_dir() {
+                stack.push((remote_child, local_child));
+            } else {
+                download_file(sftp, &remote_child, &local_child).await?;
+            }
+        }
+    }
     Ok(())
 }
 

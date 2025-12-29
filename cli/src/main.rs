@@ -12,9 +12,9 @@ use proto::agent_client::AgentClient;
 use proto::{
     AddClusterInit, AddClusterRequest, ListClustersRequest, ListClustersResponse,
     ListClustersUnitResponse, ListJobsRequest, ListJobsResponse, ListJobsUnitResponse, LsRequest,
-    LsRequestInit, MfaAnswer, MfaPrompt, PingRequest, StreamEvent, SubmitPathFilterAction,
-    SubmitPathFilterRule, SubmitRequest, add_cluster_init, add_cluster_request, stream_event,
-    submit_status,
+    LsRequestInit, MfaAnswer, MfaPrompt, PingRequest, RetrieveJobRequest, RetrieveJobRequestInit,
+    StreamEvent, SubmitPathFilterAction, SubmitPathFilterRule, SubmitRequest, add_cluster_init,
+    add_cluster_request, stream_event, submit_status,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -98,6 +98,8 @@ enum JobsCmd {
     List(ListJobsArgs),
     /// Show job details.
     Get(JobGetArgs),
+    /// Retrieve a file or directory from a job run folder.
+    Retrieve(JobRetrieveArgs),
 }
 
 #[derive(Args, Debug)]
@@ -115,6 +117,16 @@ struct ListJobsArgs {
     cluster: Option<String>,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct JobRetrieveArgs {
+    job_id: i64,
+    path: String,
+    #[arg(long)]
+    dest: Option<PathBuf>,
+    #[arg(long)]
+    cluster: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -841,6 +853,55 @@ async fn send_ls(
     ensure_exit_code(exit_code, "received exit code")
 }
 
+async fn send_job_retrieve(
+    client: &mut AgentClient<Channel>,
+    job_id: i64,
+    path: &str,
+    dest: &Option<PathBuf>,
+    cluster: &Option<String>,
+) -> anyhow::Result<()> {
+    let mut local_base = match dest {
+        Some(v) => v.clone(),
+        None => std::env::current_dir()?,
+    };
+    if !local_base.is_absolute() {
+        local_base = std::env::current_dir()?.join(local_base);
+    }
+    let local_path = local_base.to_string_lossy().into_owned();
+
+    let (tx_ans, rx_ans) = mpsc::channel::<RetrieveJobRequest>(16);
+    let outbound = ReceiverStream::new(rx_ans);
+    tx_ans
+        .send(RetrieveJobRequest {
+            msg: Some(proto::retrieve_job_request::Msg::Init(
+                RetrieveJobRequestInit {
+                    job_id,
+                    hostid: cluster.to_owned(),
+                    path: path.to_owned(),
+                    local_path: Some(local_path),
+                },
+            )),
+        })
+        .await?;
+
+    let response = client.retrieve_job(Request::new(outbound)).await?;
+    let inbound = response.into_inner();
+    let tx_mfa = tx_ans.clone();
+    let exit_code = handle_stream_events(inbound, move |answers| {
+        let tx_mfa = tx_mfa.clone();
+        async move {
+            tx_mfa
+                .send(RetrieveJobRequest {
+                    msg: Some(proto::retrieve_job_request::Msg::Mfa(answers)),
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("server closed while sending MFA answers"))
+        }
+    })
+    .await?;
+    ensure_exit_code(exit_code, "received exit code")
+}
+
 fn submit_filters_from_matches(matches: &clap::ArgMatches) -> Vec<SubmitPathFilterRule> {
     let Some(("submit", sub_matches)) = matches.subcommand() else {
         return Vec::new();
@@ -1317,6 +1378,16 @@ async fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
+                }
+                JobsCmd::Retrieve(args) => {
+                    send_job_retrieve(
+                        &mut client,
+                        args.job_id,
+                        &args.path,
+                        &args.dest,
+                        &args.cluster,
+                    )
+                    .await?
                 }
             }
         }

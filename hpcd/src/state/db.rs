@@ -729,6 +729,53 @@ impl HostStore {
         .await?;
         Ok(rows.into_iter().map(row_to_job).collect())
     }
+    pub async fn list_jobs_by_job_id(
+        &self,
+        job_id: i64,
+        hostid: Option<&str>,
+    ) -> Result<Vec<JobRecord>> {
+        let rows = if let Some(hostid) = hostid {
+            sqlx::query(
+                r#"
+                select aj.id as id,
+                       aj.job_id as job_id,
+                       aj.is_completed as is_completed,
+                       aj.created_at as created_at,
+                       aj.completed_at as completed_at,
+                       aj.local_path as local_path,
+                       aj.remote_path as remote_path,
+                       h.hostid as hostid
+                from jobs aj
+                join hosts h on aj.host_id = h.id
+                where aj.job_id = ?1 and h.hostid = ?2
+                "#,
+            )
+            .bind(job_id)
+            .bind(hostid)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                select aj.id as id,
+                       aj.job_id as job_id,
+                       aj.is_completed as is_completed,
+                       aj.created_at as created_at,
+                       aj.completed_at as completed_at,
+                       aj.local_path as local_path,
+                       aj.remote_path as remote_path,
+                       h.hostid as hostid
+                from jobs aj
+                join hosts h on aj.host_id = h.id
+                where aj.job_id = ?1
+                "#,
+            )
+            .bind(job_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.into_iter().map(row_to_job).collect())
+    }
 
     pub async fn list_all_jobs(&self) -> Result<Vec<JobRecord>> {
         let rows = sqlx::query(
@@ -1125,6 +1172,43 @@ mod tests {
         assert!(!got.is_completed);
         assert!(got.finished_at.is_none());
         assert!(!got.created_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_jobs_by_job_id_filters_by_hostid() {
+        let db = HostStore::open_memory().await.unwrap();
+        let host_a = make_host("host-a", "alice", Address::Hostname("node-a".into()));
+        let host_b = make_host("host-b", "bob", Address::Hostname("node-b".into()));
+        db.insert_host(&host_a).await.unwrap();
+        db.insert_host(&host_b).await.unwrap();
+
+        let host_a_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
+        let host_b_row = db.get_by_hostid("host-b").await.unwrap().unwrap();
+
+        let job_a = NewJob {
+            job_id: Some(42),
+            host_id: host_a_row.id,
+            local_path: "/tmp/local-a".into(),
+            remote_path: "/remote/run-a".into(),
+        };
+        let job_b = NewJob {
+            job_id: Some(42),
+            host_id: host_b_row.id,
+            local_path: "/tmp/local-b".into(),
+            remote_path: "/remote/run-b".into(),
+        };
+        db.insert_job(&job_a).await.unwrap();
+        db.insert_job(&job_b).await.unwrap();
+
+        let all = db.list_jobs_by_job_id(42, None).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let only_a = db
+            .list_jobs_by_job_id(42, Some("host-a"))
+            .await
+            .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].host_id, "host-a");
     }
 
     #[tokio::test]
