@@ -162,8 +162,8 @@ pub type Result<T> = std::result::Result<T, HostStoreError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct NewJob {
-    /// Job ID; host-specific. Database will additionally keep its own, internal id
-    pub job_id: Option<i64>,
+    /// Slurm job ID; host-specific. Database will additionally keep its own, internal id.
+    pub slurm_id: Option<i64>,
     /// Host ID on which the job is submitted.
     pub host_id: i64,
     pub local_path: String,
@@ -174,7 +174,7 @@ pub struct NewJob {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct JobRecord {
     pub id: i64,
-    pub job_id: Option<i64>,
+    pub slurm_id: Option<i64>,
     pub host_id: String,
     pub created_at: String,
     pub finished_at: Option<String>,
@@ -343,16 +343,22 @@ impl HostStore {
             r#"
             create table if not exists jobs (
             id integer primary key autoincrement,
-            job_id integer,
+            slurm_id integer,
             host_id integer not null references hosts(id) on delete cascade,
             local_path TEXT NOT NULL,
             remote_path TEXT NOT NULL,
             is_completed boolean default 0,
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             completed_at text);
-        create index if not exists idx_jobs_host_id on jobs(host_id);
-        create index if not  exists idx_jobs_job_id_host_id  on jobs(job_id,host_id);
     "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_jobs_host_id ON jobs(host_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_slurm_id_host_id ON jobs(slurm_id,host_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -698,12 +704,12 @@ impl HostStore {
     pub async fn insert_job(&self, job: &NewJob) -> Result<i64> {
         let rec = sqlx::query(
             r#"
-        insert into jobs(job_id, host_id, local_path, remote_path)
+        insert into jobs(slurm_id, host_id, local_path, remote_path)
         values (?1, ?2, ?3, ?4)
         returning id;
     "#,
         )
-        .bind(job.job_id)
+        .bind(job.slurm_id)
         .bind(job.host_id)
         .bind(job.local_path.clone())
         .bind(job.remote_path.clone())
@@ -718,7 +724,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs where host_id = ?1
             )
-            select aj.id as id, aj.job_id as job_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -729,52 +735,26 @@ impl HostStore {
         .await?;
         Ok(rows.into_iter().map(row_to_job).collect())
     }
-    pub async fn list_jobs_by_job_id(
-        &self,
-        job_id: i64,
-        hostid: Option<&str>,
-    ) -> Result<Vec<JobRecord>> {
-        let rows = if let Some(hostid) = hostid {
-            sqlx::query(
-                r#"
-                select aj.id as id,
-                       aj.job_id as job_id,
-                       aj.is_completed as is_completed,
-                       aj.created_at as created_at,
-                       aj.completed_at as completed_at,
-                       aj.local_path as local_path,
-                       aj.remote_path as remote_path,
-                       h.hostid as hostid
-                from jobs aj
-                join hosts h on aj.host_id = h.id
-                where aj.job_id = ?1 and h.hostid = ?2
-                "#,
-            )
-            .bind(job_id)
-            .bind(hostid)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                r#"
-                select aj.id as id,
-                       aj.job_id as job_id,
-                       aj.is_completed as is_completed,
-                       aj.created_at as created_at,
-                       aj.completed_at as completed_at,
-                       aj.local_path as local_path,
-                       aj.remote_path as remote_path,
-                       h.hostid as hostid
-                from jobs aj
-                join hosts h on aj.host_id = h.id
-                where aj.job_id = ?1
-                "#,
-            )
-            .bind(job_id)
-            .fetch_all(&self.pool)
-            .await?
-        };
-        Ok(rows.into_iter().map(row_to_job).collect())
+    pub async fn get_job_by_job_id(&self, id: i64) -> Result<Option<JobRecord>> {
+        let row = sqlx::query(
+            r#"
+            select aj.id as id,
+                   aj.slurm_id as slurm_id,
+                   aj.is_completed as is_completed,
+                   aj.created_at as created_at,
+                   aj.completed_at as completed_at,
+                   aj.local_path as local_path,
+                   aj.remote_path as remote_path,
+                   h.hostid as hostid
+            from jobs aj
+            join hosts h on aj.host_id = h.id
+            where aj.id = ?1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_job))
     }
 
     pub async fn list_all_jobs(&self) -> Result<Vec<JobRecord>> {
@@ -783,7 +763,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs
             )
-            select aj.id as id, aj.job_id as job_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -797,7 +777,7 @@ impl HostStore {
     pub async fn list_running_jobs(&self) -> Result<Vec<JobRecord>> {
         let rows = sqlx::query(
             r#"
-            select aj.id as id, aj.job_id as job_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from jobs aj
             join hosts h
               on aj.host_id = h.id
@@ -895,7 +875,7 @@ fn row_to_partition(row: sqlx::sqlite::SqliteRow) -> PartitionRecord {
 fn row_to_job(row: sqlx::sqlite::SqliteRow) -> JobRecord {
     JobRecord {
         id: row.try_get("id").unwrap(),
-        job_id: row.try_get("job_id").unwrap(),
+        slurm_id: row.try_get("slurm_id").unwrap(),
         host_id: row.try_get("hostid").unwrap(),
         created_at: row.try_get("created_at").unwrap(),
         finished_at: row.try_get("completed_at").unwrap(),
@@ -1155,7 +1135,7 @@ mod tests {
 
         let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
         let job = NewJob {
-            job_id: Some(42),
+            slurm_id: Some(42),
             host_id: host_row.id,
             local_path: "/tmp/local".into(),
             remote_path: "/remote/run".into(),
@@ -1165,7 +1145,7 @@ mod tests {
         let jobs = db.list_jobs_for_host(host_row.id).await.unwrap();
         assert_eq!(jobs.len(), 1);
         let got = &jobs[0];
-        assert_eq!(got.job_id, Some(42));
+        assert_eq!(got.slurm_id, Some(42));
         assert_eq!(got.host_id, "host-a");
         assert_eq!(got.local_path, "/tmp/local");
         assert_eq!(got.remote_path, "/remote/run");
@@ -1175,40 +1155,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_jobs_by_job_id_filters_by_hostid() {
+    async fn get_job_by_job_id_returns_row() {
         let db = HostStore::open_memory().await.unwrap();
-        let host_a = make_host("host-a", "alice", Address::Hostname("node-a".into()));
-        let host_b = make_host("host-b", "bob", Address::Hostname("node-b".into()));
-        db.insert_host(&host_a).await.unwrap();
-        db.insert_host(&host_b).await.unwrap();
+        let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
+        db.insert_host(&host).await.unwrap();
 
-        let host_a_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
-        let host_b_row = db.get_by_hostid("host-b").await.unwrap().unwrap();
-
-        let job_a = NewJob {
-            job_id: Some(42),
-            host_id: host_a_row.id,
+        let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
+        let job = NewJob {
+            slurm_id: Some(42),
+            host_id: host_row.id,
             local_path: "/tmp/local-a".into(),
             remote_path: "/remote/run-a".into(),
         };
-        let job_b = NewJob {
-            job_id: Some(42),
-            host_id: host_b_row.id,
-            local_path: "/tmp/local-b".into(),
-            remote_path: "/remote/run-b".into(),
-        };
-        db.insert_job(&job_a).await.unwrap();
-        db.insert_job(&job_b).await.unwrap();
+        let job_id = db.insert_job(&job).await.unwrap();
 
-        let all = db.list_jobs_by_job_id(42, None).await.unwrap();
-        assert_eq!(all.len(), 2);
-
-        let only_a = db
-            .list_jobs_by_job_id(42, Some("host-a"))
-            .await
-            .unwrap();
-        assert_eq!(only_a.len(), 1);
-        assert_eq!(only_a[0].host_id, "host-a");
+        let got = db.get_job_by_job_id(job_id).await.unwrap().unwrap();
+        assert_eq!(got.id, job_id);
+        assert_eq!(got.slurm_id, Some(42));
+        assert_eq!(got.host_id, "host-a");
     }
 
     #[tokio::test]
@@ -1219,13 +1183,13 @@ mod tests {
 
         let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
         let job1 = NewJob {
-            job_id: Some(101),
+            slurm_id: Some(101),
             host_id: host_row.id,
             local_path: "/tmp/local1".into(),
             remote_path: "/remote/run1".into(),
         };
         let job2 = NewJob {
-            job_id: Some(102),
+            slurm_id: Some(102),
             host_id: host_row.id,
             local_path: "/tmp/local2".into(),
             remote_path: "/remote/run2".into(),

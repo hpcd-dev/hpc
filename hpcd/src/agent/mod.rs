@@ -141,8 +141,8 @@ impl AgentSvc {
             }
 
             for job in host_jobs {
-                let Some(job_id) = job.job_id else {
-                    log::warn!("job {} has no slurm job id; skipping", job.id);
+                let Some(job_id) = job.slurm_id else {
+                    log::warn!("job {} has no slurm id; skipping", job.id);
                     continue;
                 };
 
@@ -476,45 +476,41 @@ impl Agent for AgentSvc {
         tokio::spawn(async move {
             let (hostid, run_path) = {
                 let hs = hs.read_owned().await;
-                let jobs = match hs.list_jobs_by_job_id(job_id, hostid.as_deref()).await {
-                    Ok(v) => v,
+                let job = match hs.get_job_by_job_id(job_id).await {
+                    Ok(Some(v)) => v,
+                    Ok(None) => {
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(format!(
+                                    "job id {job_id} not found",
+                                ))),
+                            }))
+                            .await;
+                        return;
+                    }
                     Err(e) => {
                         let _ = evt_tx
                             .send(Ok(StreamEvent {
                                 event: Some(stream_event::Event::Error(format!(
-                                    "could not fetch job {job_id}: {e}",
+                                    "could not fetch job id {job_id}: {e}",
                                 ))),
                             }))
                             .await;
                         return;
                     }
                 };
-                let job = match jobs.as_slice() {
-                    [] => {
+                if let Some(expected) = hostid.as_deref() {
+                    if expected != job.host_id {
                         let _ = evt_tx
                             .send(Ok(StreamEvent {
                                 event: Some(stream_event::Event::Error(format!(
-                                    "job {job_id} not found",
+                                    "job id {job_id} not found in cluster '{expected}'",
                                 ))),
                             }))
                             .await;
                         return;
                     }
-                    [job] => job,
-                    _ => {
-                        let message = if let Some(hostid) = hostid.as_deref() {
-                            format!("multiple jobs matched job id {job_id} in {hostid}")
-                        } else {
-                            format!("job id {job_id} matched multiple clusters; use --cluster")
-                        };
-                        let _ = evt_tx
-                            .send(Ok(StreamEvent {
-                                event: Some(stream_event::Event::Error(message)),
-                            }))
-                            .await;
-                        return;
-                    }
-                };
+                }
                 (job.host_id.clone(), job.remote_path.clone())
             };
 
@@ -958,18 +954,18 @@ impl Agent for AgentSvc {
             };
 
             let nj = NewJob {
-                job_id: jobId,
+                slurm_id: jobId,
                 host_id: hr.id,
                 local_path: local_path,
                 remote_path: remote_path,
             };
             match hs.insert_job(&nj).await {
-                Ok(internal_job_id) => match jobId {
+                Ok(job_id) => match jobId {
                     Some(v) => {
                         let _ = evt_tx
                                 .send(Ok(StreamEvent {
                                     event: Some(stream_event::Event::Stdout(
-                                        format!("Successfully submitted sbatch script with job id {} , internal job id {}", v, internal_job_id)
+                                        format!("Successfully submitted sbatch script with slurm id {} , job id {}", v, job_id)
                                             .into(),
                                     )),
                                 }))
@@ -979,7 +975,7 @@ impl Agent for AgentSvc {
                         let _ = evt_tx
                                 .send(Ok(StreamEvent {
                                     event: Some(stream_event::Event::Stdout(
-                                        format!("Successfully submitted sbatch script, did not receive a vaild job id from system; internal job id {}", internal_job_id).into()
+                                        format!("Successfully submitted sbatch script, did not receive a valid slurm id from system; job id {}", job_id).into()
                                     )),
                                 }))
                                 .await;
@@ -989,7 +985,7 @@ impl Agent for AgentSvc {
                     let _ = evt_tx
                             .send(Ok(StreamEvent {
                                 event: Some(stream_event::Event::Error(
-                                    format!("Successfully submitted sbatch script with job id {:?}, failed to create internal record: {}", jobId, e)
+                                    format!("Successfully submitted sbatch script with slurm id {:?}, failed to create job record: {}", jobId, e)
                                 )),
                             }))
                             .await;
@@ -1579,8 +1575,8 @@ fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitRespo
 fn db_job_record_to_api_unit_response(jr: &JobRecord) -> ListJobsUnitResponse {
     let rp = ListJobsUnitResponse {
         hostid: jr.host_id.clone(),
-        internal_job_id: jr.id,
-        job_id: jr.job_id,
+        job_id: jr.id,
+        slurm_id: jr.slurm_id,
         created_at: jr.created_at.clone(),
         finished_at: jr.finished_at.clone(),
         is_completed: jr.is_completed,

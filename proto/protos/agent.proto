@@ -58,8 +58,8 @@ message LsRequest {
 }
 
 message RetrieveJobRequestInit {
-  int64 job_id = 1;        // job id returned by the scheduler
-  optional string hostid = 2; // optional host identifier to disambiguate
+  int64 job_id = 1; // internal job id from the daemon
+  optional string hostid = 2; // optional host identifier to validate ownership
   string path = 3;         // remote path (absolute or relative to run folder)
   optional string local_path = 4; // local destination base path
 }
@@ -138,8 +138,8 @@ message ListClustersResponse {
 
 message ListJobsUnitResponse {
   string hostid = 1;
-  int64 internalJobId = 2;
-  optional int64 jobId = 3;
+  int64 job_id = 2;
+  optional int64 slurm_id = 3;
   string created_at = 4;
   optional string finished_at = 5;
   bool is_completed = 6;

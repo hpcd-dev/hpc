@@ -104,6 +104,7 @@ enum JobsCmd {
 
 #[derive(Args, Debug)]
 struct JobGetArgs {
+    /// Job id from the daemon.
     job_id: i64,
     #[arg(long)]
     cluster: Option<String>,
@@ -121,6 +122,7 @@ struct ListJobsArgs {
 
 #[derive(Args, Debug)]
 struct JobRetrieveArgs {
+    /// Job id from the daemon.
     job_id: i64,
     path: String,
     #[arg(long)]
@@ -324,8 +326,8 @@ fn job_to_json(item: &ListJobsUnitResponse) -> serde_json::Value {
         false => "running",
     };
     json!({
-        "internal_job_id": item.internal_job_id,
         "job_id": item.job_id,
+        "slurm_id": item.slurm_id,
         "hostid": item.hostid.as_str(),
         "status": status,
         "is_completed": item.is_completed,
@@ -482,12 +484,13 @@ async fn fetch_list_jobs(
 }
 
 fn print_jobs_table(jobs: &[ListJobsUnitResponse]) {
-    let headers = ["job id", "host id", "status", "created", "finished"];
-    let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
+    let headers = ["job id", "slurm id", "host id", "status", "created", "finished"];
+    let mut rows: Vec<(String, String, String, String, String, String)> = Vec::new();
 
     for item in jobs.iter() {
-        let job_id = item
-            .job_id
+        let job_id = item.job_id.to_string();
+        let slurm_id = item
+            .slurm_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "-".to_string());
         let completed_str = match item.is_completed {
@@ -497,6 +500,7 @@ fn print_jobs_table(jobs: &[ListJobsUnitResponse]) {
         let finished_at = item.finished_at.clone().unwrap_or_else(|| "-".to_string());
         rows.push((
             job_id,
+            slurm_id,
             item.hostid.clone(),
             completed_str.to_string(),
             item.created_at.clone(),
@@ -504,12 +508,13 @@ fn print_jobs_table(jobs: &[ListJobsUnitResponse]) {
         ));
     }
 
-    let mut widths: [usize; 5] = [
+    let mut widths: [usize; 6] = [
         str_width(headers[0]),
         str_width(headers[1]),
         str_width(headers[2]),
         str_width(headers[3]),
         str_width(headers[4]),
+        str_width(headers[5]),
     ];
     for row in rows.iter() {
         widths[0] = widths[0].max(str_width(&row.0));
@@ -517,35 +522,40 @@ fn print_jobs_table(jobs: &[ListJobsUnitResponse]) {
         widths[2] = widths[2].max(str_width(&row.2));
         widths[3] = widths[3].max(str_width(&row.3));
         widths[4] = widths[4].max(str_width(&row.4));
+        widths[5] = widths[5].max(str_width(&row.5));
     }
 
     println!(
-        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}",
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}",
         headers[0],
         headers[1],
         headers[2],
         headers[3],
         headers[4],
+        headers[5],
         w0 = widths[0],
         w1 = widths[1],
         w2 = widths[2],
         w3 = widths[3],
-        w4 = widths[4]
+        w4 = widths[4],
+        w5 = widths[5]
     );
 
     for row in rows {
         println!(
-            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}",
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}",
             row.0,
             row.1,
             row.2,
             row.3,
             row.4,
+            row.5,
             w0 = widths[0],
             w1 = widths[1],
             w2 = widths[2],
             w3 = widths[3],
-            w4 = widths[4]
+            w4 = widths[4],
+            w5 = widths[5]
         );
     }
 }
@@ -556,16 +566,16 @@ fn print_jobs_json(jobs: &[ListJobsUnitResponse]) -> anyhow::Result<()> {
 }
 
 fn print_job_details(item: &ListJobsUnitResponse) {
-    let job_id = item
-        .job_id
+    let slurm_id = item
+        .slurm_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| "-".to_string());
     let completed_str = match item.is_completed {
         true => "completed",
         false => "running",
     };
-    println!("internal_id: {}", item.internal_job_id);
-    println!("job_id: {}", job_id);
+    println!("job_id: {}", item.job_id);
+    println!("slurm_id: {}", slurm_id);
     println!("hostid: {}", item.hostid);
     println!("status: {}", completed_str);
     println!("created: {}", item.created_at);
@@ -1352,14 +1362,18 @@ async fn main() -> anyhow::Result<()> {
                     let matches: Vec<&ListJobsUnitResponse> = response
                         .jobs
                         .iter()
-                        .filter(|job| job.job_id == Some(args.job_id))
+                        .filter(|job| job.job_id == args.job_id)
                         .collect();
                     match matches.as_slice() {
                         [] => {
                             if let Some(cluster) = args.cluster.as_deref() {
-                                bail!("job {} not found in cluster '{}'", args.job_id, cluster);
+                                bail!(
+                                    "job id {} not found in cluster '{}'",
+                                    args.job_id,
+                                    cluster
+                                );
                             }
-                            bail!("job {} not found", args.job_id);
+                            bail!("job id {} not found", args.job_id);
                         }
                         [job] => {
                             if args.json {
@@ -1370,7 +1384,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                         _ => {
                             if args.cluster.is_some() {
-                                bail!("multiple jobs matched job id {}", args.job_id);
+                                bail!(
+                                    "multiple jobs matched job id {}",
+                                    args.job_id
+                                );
                             }
                             bail!(
                                 "job id {} matched multiple clusters; use --cluster",
