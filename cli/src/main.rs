@@ -4,9 +4,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode},
     execute,
-    queue,
-    style::{Color, ResetColor, SetForegroundColor},
-    terminal::{self, ClearType},
+    terminal,
 };
 use proto::agent_client::AgentClient;
 use proto::{
@@ -15,6 +13,17 @@ use proto::{
     LsRequestInit, MfaAnswer, MfaPrompt, PingRequest, RetrieveJobRequest, RetrieveJobRequestInit,
     StreamEvent, SubmitPathFilterAction, SubmitPathFilterRule, SubmitRequest, add_cluster_init,
     add_cluster_request, stream_event, submit_status,
+};
+use ratatui::{
+    Terminal,
+    TerminalOptions,
+    Viewport,
+    backend::{Backend, ClearType, CrosstermBackend},
+    layout::{Constraint, Direction, Layout, Position},
+    prelude::Frame,
+    style::{Color, Modifier, Style},
+    symbols::braille,
+    widgets::{Clear, List, ListItem, ListState, Paragraph},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -611,14 +620,38 @@ struct Spinner {
     handle: tokio::task::JoinHandle<()>,
 }
 
+fn braille_spinner_frames() -> [char; 6] {
+    let all_mask = braille::DOTS
+        .iter()
+        .take(3)
+        .flatten()
+        .fold(0u16, |acc, mask| acc | mask);
+    let order = [
+        (0usize, 0usize),
+        (0, 1),
+        (1, 1),
+        (2, 1),
+        (2, 0),
+        (1, 0),
+    ];
+    let mut frames = [' '; 6];
+    for (idx, (row, col)) in order.iter().enumerate() {
+        let mask = braille::DOTS[*row][*col];
+        let codepoint = u32::from(braille::BLANK | (all_mask & !mask));
+        frames[idx] = char::from_u32(codepoint).unwrap_or(' ');
+    }
+    frames
+}
+
 impl Spinner {
     fn start(message: &str) -> Self {
         let message = message.to_string();
+        let frames = braille_spinner_frames();
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn({
             let message = message.clone();
+            let frames = frames;
             async move {
-                let frames = ["|", "/", "-", "\\"];
                 let mut interval = tokio::time::interval(Duration::from_millis(120));
                 let mut i = 0usize;
                 tokio::pin!(stop_rx);
@@ -783,7 +816,7 @@ where
                     match phase {
                         submit_status::Phase::Resolved => {
                             if !printed_remote_path {
-                                println!("  remote target: {}", status.remote_path);
+                                println!("remote target: {}", status.remote_path);
                                 printed_remote_path = true;
                             }
                         }
@@ -953,8 +986,6 @@ async fn send_submit(
     sbatchscript: &str,
     filters: &[SubmitPathFilterRule],
 ) -> anyhow::Result<()> {
-    println!("Submitting job");
-    println!("  hostid: {hostid}");
     // outgoing stream client -> server with MFA answers
     let (tx_ans, rx_ans) = mpsc::channel::<SubmitRequest>(16);
     let outbound = ReceiverStream::new(rx_ans);
@@ -1166,7 +1197,7 @@ impl TerminalGuard {
         }
         terminal::enable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        if let Err(err) = execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide) {
+        if let Err(err) = execute!(stdout, cursor::Hide) {
             let _ = terminal::disable_raw_mode();
             return Err(err.into());
         }
@@ -1177,79 +1208,181 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut stdout = std::io::stdout();
-        let _ = execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen);
+        let _ = execute!(stdout, cursor::Show);
         let _ = terminal::disable_raw_mode();
     }
 }
 
-fn render_sbatch_picker<W: Write>(
-    w: &mut W,
-    scripts: &[String],
-    selected: usize,
-) -> anyhow::Result<()> {
-    queue!(w, cursor::MoveTo(0, 0), terminal::Clear(ClearType::All))?;
-    queue!(
-        w,
-        cursor::MoveTo(0, 0),
-        terminal::Clear(ClearType::CurrentLine)
-    )?;
-    write!(
-        w,
-        "Multiple .sbatch files found. Use Up/Down to choose, Enter to select:"
-    )?;
-    for (idx, script) in scripts.iter().enumerate() {
-        let row = (idx + 1) as u16;
-        let color = if idx == selected {
-            Color::Magenta
-        } else {
-            Color::Rgb {
-                r: 128,
-                g: 0,
-                b: 128,
-            }
-        };
-        queue!(
-            w,
-            cursor::MoveTo(0, row),
-            terminal::Clear(ClearType::CurrentLine),
-            SetForegroundColor(color)
-        )?;
-        write!(w, "{}", script)?;
-        queue!(w, ResetColor)?;
-    }
-    w.flush()?;
-    Ok(())
+type RatatuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SbatchPickerPhase {
+    Selecting,
+    Selected(usize),
+    Canceled,
 }
 
-fn pick_sbatch_script(scripts: &[String]) -> anyhow::Result<String> {
-    let _guard = TerminalGuard::enter()?;
-    let mut stdout = std::io::stdout();
-    let mut selected = 0usize;
+struct SbatchPicker {
+    scripts: Vec<String>,
+    list_state: ListState,
+    phase: SbatchPickerPhase,
+    viewport_height: usize,
+}
 
-    loop {
-        render_sbatch_picker(&mut stdout, scripts, selected)?;
-        match event::read()? {
-            Event::Key(key) => match key.code {
-                KeyCode::Up => {
-                    if selected > 0 {
-                        selected -= 1;
-                    }
+impl SbatchPicker {
+    fn new(scripts: Vec<String>) -> Self {
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let viewport_height = scripts.len().min(8).max(1);
+        Self {
+            scripts,
+            list_state,
+            phase: SbatchPickerPhase::Selecting,
+            viewport_height,
+        }
+    }
+
+    fn handle_event(&mut self, event: Event) {
+        if self.phase != SbatchPickerPhase::Selecting {
+            return;
+        }
+        let len = self.scripts.len();
+        if len == 0 {
+            self.phase = SbatchPickerPhase::Canceled;
+            return;
+        }
+        if let Event::Key(key) = event {
+            match key.code {
+                KeyCode::Up => self.move_selection(-1),
+                KeyCode::Down => self.move_selection(1),
+                KeyCode::PageUp => self.move_selection(-(self.viewport_height as isize)),
+                KeyCode::PageDown => self.move_selection(self.viewport_height as isize),
+                KeyCode::Home => self.select_index(0),
+                KeyCode::End => self.select_index(len.saturating_sub(1)),
+                KeyCode::Enter => {
+                    let selected = self.list_state.selected().unwrap_or(0);
+                    self.phase = SbatchPickerPhase::Selected(selected);
                 }
-                KeyCode::Down => {
-                    if selected + 1 < scripts.len() {
-                        selected += 1;
-                    }
-                }
-                KeyCode::Enter => return Ok(scripts[selected].clone()),
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
-                    bail!("sbatch selection canceled")
+                    self.phase = SbatchPickerPhase::Canceled;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                    bail!("sbatch selection canceled")
+                    self.phase = SbatchPickerPhase::Canceled;
                 }
                 _ => {}
-            },
-            _ => {}
+            }
+        }
+    }
+
+    fn select_index(&mut self, index: usize) {
+        let index = index.min(self.scripts.len().saturating_sub(1));
+        self.list_state.select(Some(index));
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let len = self.scripts.len();
+        if len == 0 {
+            return;
+        }
+        let current = self.list_state.selected().unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, (len - 1) as isize) as usize;
+        self.list_state.select(Some(next));
+    }
+
+    fn render(&mut self, frame: &mut Frame) {
+        let area = frame.size();
+        frame.render_widget(Clear, area);
+
+        let items: Vec<ListItem> = self
+            .scripts
+            .iter()
+            .map(|script| ListItem::new(script.as_str()))
+            .collect();
+        let list = List::new(items)
+            .highlight_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+            .highlight_symbol("> ");
+
+        let list_area = if area.height >= 3 {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .split(area);
+
+            let header = Paragraph::new("Select sbatch script");
+            frame.render_widget(header, layout[0]);
+
+            let footer = Paragraph::new("Up/Down to move, Enter to select, Esc to cancel")
+                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM));
+            frame.render_widget(footer, layout[2]);
+            layout[1]
+        } else if area.height == 2 {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(area);
+            let header = Paragraph::new("Select sbatch script");
+            frame.render_widget(header, layout[0]);
+            layout[1]
+        } else {
+            area
+        };
+
+        frame.render_stateful_widget(list, list_area, &mut self.list_state);
+        self.viewport_height = list_area.height as usize;
+    }
+
+    fn inline_viewport_height(&self) -> u16 {
+        let header = 1u16;
+        let footer = 1u16;
+        let max_list = 8u16;
+        let list_height = (self.scripts.len().max(1) as u16).min(max_list);
+        let desired = header + footer + list_height;
+        desired.max(1)
+    }
+
+    fn clear(&mut self, terminal: &mut RatatuiTerminal, start: Position) -> anyhow::Result<()> {
+        terminal.backend_mut().set_cursor_position(start)?;
+        terminal.backend_mut().clear_region(ClearType::AfterCursor)?;
+        Ok(())
+    }
+
+}
+
+fn pick_sbatch_script(scripts: Vec<String>) -> anyhow::Result<String> {
+    let _guard = TerminalGuard::enter()?;
+    let (cursor_x, cursor_y) = cursor::position()?;
+    let (_, term_height) = terminal::size()?;
+    let mut picker = SbatchPicker::new(scripts);
+    let desired_height = picker.inline_viewport_height();
+    let viewport_height = desired_height.min(term_height.max(1));
+    let lines_after_cursor = viewport_height.saturating_sub(1);
+    let available_lines = term_height.saturating_sub(cursor_y).saturating_sub(1);
+    let scroll_lines = lines_after_cursor.saturating_sub(available_lines);
+    let start_pos = Position::new(cursor_x, cursor_y.saturating_sub(scroll_lines));
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(std::io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(viewport_height),
+        },
+    )?;
+
+    loop {
+        terminal.draw(|frame| picker.render(frame))?;
+        picker.handle_event(event::read()?);
+        match picker.phase {
+            SbatchPickerPhase::Selecting => {}
+            SbatchPickerPhase::Selected(index) => {
+                picker.clear(&mut terminal, start_pos)?;
+                return Ok(picker.scripts[index].clone());
+            }
+            SbatchPickerPhase::Canceled => {
+                picker.clear(&mut terminal, start_pos)?;
+                bail!("sbatch selection canceled")
+            }
         }
     }
 }
@@ -1301,7 +1434,7 @@ fn resolve_sbatch_script(
                 }
                 bail!("{}", msg.trim_end())
             }
-            pick_sbatch_script(&relative_scripts)
+            pick_sbatch_script(relative_scripts)
         }
     }
 }
@@ -1333,8 +1466,12 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
             let local_path_buf = PathBuf::from(&local_path);
+            println!("Submitting job...");
+            println!("hostid: {hostid}");
+            let _ = std::io::stdout().flush();
             let sbatchscript =
                 resolve_sbatch_script(&local_path_buf, sbatchscript.as_deref(), headless)?;
+            println!("selected sbatch script: {sbatchscript}");
             send_submit(
                 &mut client,
                 &hostid,

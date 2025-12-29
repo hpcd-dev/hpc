@@ -19,6 +19,7 @@ serde_json = "1.0.145"
 thiserror = "2.0.17"
 tera = "1.20.0"
 crossterm = "0.28.1"
+ratatui = { version = "0.28.0", features = ["crossterm"] }
 
 
 [[bin]]
