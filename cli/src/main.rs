@@ -330,16 +330,14 @@ fn cluster_to_json(item: &ListClustersUnitResponse) -> serde_json::Value {
 }
 
 fn job_to_json(item: &ListJobsUnitResponse) -> serde_json::Value {
-    let status = match item.is_completed {
-        true => "completed",
-        false => "running",
-    };
+    let status = job_status(item);
     json!({
         "job_id": item.job_id,
         "slurm_id": item.slurm_id,
         "hostid": item.hostid.as_str(),
         "status": status,
         "is_completed": item.is_completed,
+        "terminal_state": item.terminal_state.as_deref(),
         "created_at": item.created_at.as_str(),
         "finished_at": item.finished_at.as_deref(),
     })
@@ -502,10 +500,7 @@ fn print_jobs_table(jobs: &[ListJobsUnitResponse]) {
             .slurm_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "-".to_string());
-        let completed_str = match item.is_completed {
-            true => "completed",
-            false => "running",
-        };
+        let completed_str = job_status(item);
         let finished_at = item.finished_at.clone().unwrap_or_else(|| "-".to_string());
         rows.push((
             job_id,
@@ -579,14 +574,15 @@ fn print_job_details(item: &ListJobsUnitResponse) {
         .slurm_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let completed_str = match item.is_completed {
-        true => "completed",
-        false => "running",
-    };
+    let completed_str = job_status(item);
     println!("job_id: {}", item.job_id);
     println!("slurm_id: {}", slurm_id);
     println!("hostid: {}", item.hostid);
     println!("status: {}", completed_str);
+    println!(
+        "terminal_state: {}",
+        item.terminal_state.as_deref().unwrap_or("-")
+    );
     println!("created: {}", item.created_at);
     println!(
         "finished: {}",
@@ -596,6 +592,17 @@ fn print_job_details(item: &ListJobsUnitResponse) {
 
 fn print_job_details_json(item: &ListJobsUnitResponse) -> anyhow::Result<()> {
     emit_json(job_to_json(item))
+}
+
+fn job_status(item: &ListJobsUnitResponse) -> &'static str {
+    if !item.is_completed {
+        return "running";
+    }
+    match item.terminal_state.as_deref() {
+        Some("COMPLETED") => "completed",
+        Some(_) => "failed",
+        None => "completed",
+    }
 }
 async fn collect_mfa_answers(mfa: &MfaPrompt) -> anyhow::Result<MfaAnswer> {
     eprintln!();

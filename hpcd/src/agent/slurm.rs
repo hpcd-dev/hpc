@@ -196,6 +196,27 @@ pub fn sacct_output_is_running(output: &str) -> Option<bool> {
     Some(false)
 }
 
+pub fn sacct_terminal_state(output: &str) -> Option<String> {
+    let states = parse_sacct_states(output);
+    if states.is_empty() {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(states.len());
+    for state in states {
+        let token = normalize_slurm_state(&state);
+        if is_slurm_state_active(&token) || !is_slurm_state_terminal(&token) {
+            return None;
+        }
+        normalized.push(token);
+    }
+    if normalized.iter().all(|state| state == "COMPLETED") {
+        return Some("COMPLETED".to_string());
+    }
+    normalized
+        .into_iter()
+        .find(|state| state != "COMPLETED")
+}
+
 fn normalize_slurm_state(state: &str) -> String {
     let token = state
         .split(|c| c == '+' || c == ':' || c == '(')
@@ -384,6 +405,24 @@ PartitionName=gpu_bynode_q5 AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Alloc
     #[test]
     fn sacct_output_empty_is_unknown() {
         assert_eq!(sacct_output_is_running(""), None);
+    }
+
+    #[test]
+    fn sacct_terminal_state_prefers_failure() {
+        let output = "COMPLETED|\nFAILED|\n";
+        assert_eq!(sacct_terminal_state(output).as_deref(), Some("FAILED"));
+    }
+
+    #[test]
+    fn sacct_terminal_state_completed_only() {
+        let output = "COMPLETED|\n";
+        assert_eq!(sacct_terminal_state(output).as_deref(), Some("COMPLETED"));
+    }
+
+    #[test]
+    fn sacct_terminal_state_running_is_none() {
+        let output = "RUNNING|\nCOMPLETED|\n";
+        assert_eq!(sacct_terminal_state(output), None);
     }
 
     #[test]

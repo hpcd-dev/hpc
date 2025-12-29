@@ -179,6 +179,7 @@ pub struct JobRecord {
     pub created_at: String,
     pub finished_at: Option<String>,
     pub is_completed: bool,
+    pub terminal_state: Option<String>,
     pub local_path: String,
     pub remote_path: String,
 }
@@ -349,11 +350,26 @@ impl HostStore {
             remote_path TEXT NOT NULL,
             is_completed boolean default 0,
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-            completed_at text);
+            completed_at text,
+            terminal_state text);
     "#,
         )
         .execute(&self.pool)
         .await?;
+        let has_terminal_state = sqlx::query("PRAGMA table_info('jobs');")
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .any(|r| {
+                r.try_get::<String, _>("name")
+                    .map(|n| n == "terminal_state")
+                    .unwrap_or(false)
+            });
+        if !has_terminal_state {
+            sqlx::query("ALTER TABLE jobs ADD COLUMN terminal_state TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_jobs_host_id ON jobs(host_id)")
             .execute(&self.pool)
             .await?;
@@ -724,7 +740,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs where host_id = ?1
             )
-            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -743,6 +759,7 @@ impl HostStore {
                    aj.is_completed as is_completed,
                    aj.created_at as created_at,
                    aj.completed_at as completed_at,
+                   aj.terminal_state as terminal_state,
                    aj.local_path as local_path,
                    aj.remote_path as remote_path,
                    h.hostid as hostid
@@ -763,7 +780,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs
             )
-            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -777,7 +794,7 @@ impl HostStore {
     pub async fn list_running_jobs(&self) -> Result<Vec<JobRecord>> {
         let rows = sqlx::query(
             r#"
-            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
             from jobs aj
             join hosts h
               on aj.host_id = h.id
@@ -789,17 +806,23 @@ impl HostStore {
         Ok(rows.into_iter().map(row_to_job).collect())
     }
 
-    pub async fn mark_job_completed(&self, id: i64) -> Result<()> {
+    pub async fn mark_job_completed(
+        &self,
+        id: i64,
+        terminal_state: Option<&str>,
+    ) -> Result<()> {
         let now = now_rfc3339();
         sqlx::query(
             r#"
             update jobs
             set is_completed = 1,
-                completed_at = ?1
-            where id = ?2
+                completed_at = ?1,
+                terminal_state = ?2
+            where id = ?3
             "#,
         )
         .bind(now)
+        .bind(terminal_state)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -880,6 +903,7 @@ fn row_to_job(row: sqlx::sqlite::SqliteRow) -> JobRecord {
         created_at: row.try_get("created_at").unwrap(),
         finished_at: row.try_get("completed_at").unwrap(),
         is_completed: row.try_get("is_completed").unwrap(),
+        terminal_state: row.try_get("terminal_state").unwrap(),
         local_path: row.try_get("local_path").unwrap(),
         remote_path: row.try_get("remote_path").unwrap(),
     }
@@ -1151,6 +1175,7 @@ mod tests {
         assert_eq!(got.remote_path, "/remote/run");
         assert!(!got.is_completed);
         assert!(got.finished_at.is_none());
+        assert!(got.terminal_state.is_none());
         assert!(!got.created_at.is_empty());
     }
 
@@ -1197,7 +1222,7 @@ mod tests {
         let job1_id = db.insert_job(&job1).await.unwrap();
         let job2_id = db.insert_job(&job2).await.unwrap();
 
-        db.mark_job_completed(job1_id).await.unwrap();
+        db.mark_job_completed(job1_id, Some("FAILED")).await.unwrap();
 
         let running = db.list_running_jobs().await.unwrap();
         assert_eq!(running.len(), 1);
@@ -1207,5 +1232,6 @@ mod tests {
         let completed = all.iter().find(|j| j.id == job1_id).unwrap();
         assert!(completed.is_completed);
         assert!(completed.finished_at.is_some());
+        assert_eq!(completed.terminal_state.as_deref(), Some("FAILED"));
     }
 }

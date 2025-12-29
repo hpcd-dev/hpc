@@ -114,7 +114,7 @@ impl AgentSvc {
                 .push(job);
         }
 
-        let mut completed_ids = Vec::new();
+        let mut completed_ids: Vec<(i64, Option<String>)> = Vec::new();
         for (hostid, host_jobs) in jobs_by_host {
             let Some(host) = host_map.get(&hostid) else {
                 log::warn!("host record missing for running job on '{hostid}'");
@@ -164,18 +164,16 @@ impl AgentSvc {
                         continue;
                     }
                     let output = String::from_utf8_lossy(&out);
-                    let running = match slurm::sacct_output_is_running(&output) {
+                    let terminal_state = match slurm::sacct_terminal_state(&output) {
                         Some(v) => v,
                         None => {
                             log::debug!(
-                                "sacct returned no state for {hostid} job {job_id}"
+                                "sacct returned no terminal state for {hostid} job {job_id}"
                             );
                             continue;
                         }
                     };
-                    if !running {
-                        completed_ids.push(job.id);
-                    }
+                    completed_ids.push((job.id, Some(terminal_state)));
                 } else {
                     let command = format!("squeue -j {job_id} -h -o %i");
                     let (out, err, code) = match sm.exec_capture(&command).await {
@@ -195,7 +193,7 @@ impl AgentSvc {
                     }
                     let output = String::from_utf8_lossy(&out);
                     if output.trim().is_empty() {
-                        completed_ids.push(job.id);
+                        completed_ids.push((job.id, None));
                     }
                 }
             }
@@ -206,8 +204,8 @@ impl AgentSvc {
         }
 
         let hs = self.hs.clone().write_owned().await;
-        for id in completed_ids {
-            if let Err(e) = hs.mark_job_completed(id).await {
+        for (id, terminal_state) in completed_ids {
+            if let Err(e) = hs.mark_job_completed(id, terminal_state.as_deref()).await {
                 log::warn!("failed to mark job {id} completed: {e}");
             }
         }
@@ -1580,6 +1578,7 @@ fn db_job_record_to_api_unit_response(jr: &JobRecord) -> ListJobsUnitResponse {
         created_at: jr.created_at.clone(),
         finished_at: jr.finished_at.clone(),
         is_completed: jr.is_completed,
+        terminal_state: jr.terminal_state.clone(),
     };
     return rp;
 }
