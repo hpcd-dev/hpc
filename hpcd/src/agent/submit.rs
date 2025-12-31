@@ -35,11 +35,6 @@ pub fn resolve_remote_sbatch_path(remote_root: &str, sbatchscript: &str) -> Stri
         .into_owned()
 }
 
-pub fn format_submit_success(slurm_id: Option<i64>, job_id: i64) -> String {
-    let _ = slurm_id;
-    format!("Successfully submitted sbatch script; job id {}\n", job_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,14 +60,5 @@ mod tests {
         assert_eq!(path, "/base/run/scripts/job.sbatch");
     }
 
-    #[test]
-    fn format_submit_success_formats_messages() {
-        let msg = format_submit_success(Some(42), 7);
-        assert!(msg.contains("job id 7"));
-        assert!(msg.ends_with('\n'));
-
-        let msg = format_submit_success(None, 7);
-        assert!(msg.contains("job id 7"));
-        assert!(msg.ends_with('\n'));
-    }
+    // No submit success formatter tests; the final submit result is encoded in RPC events.
 }

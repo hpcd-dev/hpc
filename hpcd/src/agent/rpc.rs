@@ -6,9 +6,7 @@ use crate::agent::helpers::{
     get_default_base_path,
 };
 use crate::agent::service::AgentSvc;
-use crate::agent::submit::{
-    format_submit_success, resolve_remote_sbatch_path, resolve_submit_remote_path,
-};
+use crate::agent::submit::{resolve_remote_sbatch_path, resolve_submit_remote_path};
 use crate::agent::types::{AgentSvcError, OutStream};
 use crate::ssh::sh_escape;
 use crate::state::db::HostStoreError;
@@ -18,8 +16,8 @@ use proto::agent_server::Agent;
 use proto::{
     AddClusterRequest, ListClustersRequest, ListClustersResponse, ListClustersUnitResponse,
     ListJobsRequest, ListJobsResponse, LsRequest, LsRequestInit, MfaAnswer, PingReply, PingRequest,
-    RetrieveJobRequest, RetrieveJobRequestInit, StreamEvent, SubmitRequest, SubmitStatus,
-    stream_event, submit_status,
+    RetrieveJobRequest, RetrieveJobRequestInit, StreamEvent, SubmitRequest, SubmitResult,
+    SubmitStatus, stream_event, submit_result, submit_status,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -480,7 +478,11 @@ impl Agent for AgentSvc {
             if let Err(err) = sync_result {
                 let _ = evt_tx
                     .send(Ok(StreamEvent {
-                        event: Some(stream_event::Event::Error(err.to_string())),
+                        event: Some(stream_event::Event::SubmitResult(SubmitResult {
+                            status: submit_result::Status::Failed as i32,
+                            job_id: None,
+                            detail: err.to_string(),
+                        })),
                     }))
                     .await;
                 return;
@@ -522,7 +524,11 @@ impl Agent for AgentSvc {
                 Err(e) => {
                     let _ = evt_tx
                         .send(Ok(StreamEvent {
-                            event: Some(stream_event::Event::Error(e.to_string())),
+                            event: Some(stream_event::Event::SubmitResult(SubmitResult {
+                                status: submit_result::Status::Failed as i32,
+                                job_id: None,
+                                detail: e.to_string(),
+                            })),
                         }))
                         .await;
                     return;
@@ -548,24 +554,38 @@ impl Agent for AgentSvc {
                 };
                 let _ = evt_tx
                     .send(Ok(StreamEvent {
-                        event: Some(stream_event::Event::Error(format!(
-                            "sbatch failed with exit code {}: {}",
-                            code, detail
-                        ))),
+                        event: Some(stream_event::Event::SubmitResult(SubmitResult {
+                            status: submit_result::Status::Failed as i32,
+                            job_id: None,
+                            detail: format!("sbatch failed with exit code {}: {}", code, detail),
+                        })),
                     }))
                     .await;
                 return;
             }
             let out_string = String::from_utf8_lossy(&out);
             let slurm_id = crate::agent::slurm::parse_job_id(&out_string);
+            if slurm_id.is_none() {
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::SubmitResult(SubmitResult {
+                            status: submit_result::Status::Failed as i32,
+                            job_id: None,
+                            detail: "sbatch did not return a job id".to_string(),
+                        })),
+                    }))
+                    .await;
+                return;
+            }
 
             let Ok(Some(hr)) = hs.get_by_hostid(&hostid).await else {
                 let _ = evt_tx
                     .send(Ok(StreamEvent {
-                        event: Some(stream_event::Event::Error(format!(
-                            "Could not resolve hostid '{}'",
-                            hostid
-                        ))),
+                        event: Some(stream_event::Event::SubmitResult(SubmitResult {
+                            status: submit_result::Status::Failed as i32,
+                            job_id: None,
+                            detail: format!("unknown hostid '{}'", hostid),
+                        })),
                     }))
                     .await;
                 return;
@@ -581,19 +601,22 @@ impl Agent for AgentSvc {
                 Ok(job_id) => {
                     let _ = evt_tx
                         .send(Ok(StreamEvent {
-                            event: Some(stream_event::Event::Stdout(
-                                format_submit_success(slurm_id, job_id).into(),
-                            )),
+                            event: Some(stream_event::Event::SubmitResult(SubmitResult {
+                                status: submit_result::Status::Submitted as i32,
+                                job_id: Some(job_id),
+                                detail: String::new(),
+                            })),
                         }))
                         .await;
                 }
                 Err(e) => {
                     let _ = evt_tx
                         .send(Ok(StreamEvent {
-                            event: Some(stream_event::Event::Error(format!(
-                                "Successfully submitted sbatch script, failed to create job record: {}",
-                                e
-                            ))),
+                            event: Some(stream_event::Event::SubmitResult(SubmitResult {
+                                status: submit_result::Status::Failed as i32,
+                                job_id: None,
+                                detail: format!("failed to create job record: {}", e),
+                            })),
                         }))
                         .await;
                 }

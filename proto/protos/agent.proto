@@ -29,6 +29,7 @@ message StreamEvent {
     MfaPrompt mfa = 4;       // MFA prompt round
     string error = 5;        // Fatal error (connection/auth/exec)
     SubmitStatus submit_status = 6; // Submit progress updates
+    SubmitResult submit_result = 7; // Submit final status
   }
 }
 
@@ -42,6 +43,17 @@ message SubmitStatus {
   string hostid = 1;
   string remote_path = 2;
   Phase phase = 3;
+}
+
+message SubmitResult {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    SUBMITTED = 1;
+    FAILED = 2;
+  }
+  Status status = 1;
+  optional int64 job_id = 2;
+  string detail = 3;
 }
 
 message LsRequestInit {

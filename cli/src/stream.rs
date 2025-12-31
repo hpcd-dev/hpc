@@ -1,6 +1,6 @@
 use crate::mfa::collect_mfa_answers;
 use anyhow::bail;
-use proto::{MfaAnswer, StreamEvent, stream_event, submit_status};
+use proto::{MfaAnswer, StreamEvent, stream_event, submit_result, submit_status};
 use ratatui::symbols::braille;
 use std::future::Future;
 use std::io::Write;
@@ -112,6 +112,9 @@ where
                 stream_event::Event::SubmitStatus(_) => {
                     // submit-specific events are handled in a different stream handler
                 }
+                stream_event::Event::SubmitResult(_) => {
+                    // submit-specific events are handled in a different stream handler
+                }
             },
             Ok(StreamEvent { event: None }) => log::info!("received empty event"),
             Err(status) => {
@@ -217,6 +220,37 @@ where
                         }
                         submit_status::Phase::Unspecified => {}
                     }
+                }
+                stream_event::Event::SubmitResult(result) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop(None).await;
+                    }
+                    let status = submit_result::Status::try_from(result.status)
+                        .unwrap_or(submit_result::Status::Unspecified);
+                    match status {
+                        submit_result::Status::Submitted => {
+                            if let Some(job_id) = result.job_id {
+                                println!("Successfully submitted sbatch script; job id {job_id}");
+                            } else {
+                                println!("Successfully submitted sbatch script.");
+                            }
+                            exit_code = Some(0);
+                        }
+                        submit_result::Status::Failed => {
+                            let detail = result.detail.trim();
+                            if detail.is_empty() {
+                                eprintln!("failed");
+                            } else {
+                                eprintln!("failed: {detail}");
+                            }
+                            exit_code = Some(1);
+                        }
+                        submit_result::Status::Unspecified => {
+                            eprintln!("failed: submit result missing status");
+                            exit_code = Some(1);
+                        }
+                    }
+                    break;
                 }
             },
             Ok(StreamEvent { event: None }) => log::info!("received empty event"),
