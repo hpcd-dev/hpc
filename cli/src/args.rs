@@ -150,14 +150,18 @@ pub struct SubmitArgs {
     group(
         ArgGroup::new("addcluster")
             .multiple(false)
-            .args(&["hostname", "ip"])
+            .args(&["destination", "hostname", "ip"])
     )
 )]
 pub struct AddClusterArgs {
+    /// Destination in ssh format: [user@]host[:port]
+    #[arg(value_name = "DESTINATION")]
+    pub destination: Option<String>,
+
     #[arg(long, value_name = "HOSTNAME")]
     pub hostname: Option<String>,
 
-    /// Use a remote URL as input
+    /// Use a remote IP address as input
     #[arg(long, value_name = "IP")]
     pub ip: Option<String>,
 

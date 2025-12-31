@@ -52,13 +52,12 @@ hpcd --database-path ./hpc.db
 
 ### 2) Add a cluster
 
-You can use `--hostname` or `--ip` (exactly one is required). `--default-base-path` is where run folders will be created by default.
+Use a destination in ssh format (`[user@]host[:port]`). `--default-base-path` is where run folders will be created by default.
 
 ```bash
 hpc cluster add \
-  --hostid mycluster \
-  --username alice \
-  --hostname login.example.edu \
+  alice@login.example.edu:22 \
+  --hostid login.example.edu \
   --identity-path ~/.ssh/id_ed25519 \
   --default-base-path /home/alice/hpc-runs
 ```
