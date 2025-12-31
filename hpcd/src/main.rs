@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use log::LevelFilter;
 use proto::agent_server::AgentServer;
 use std::net::SocketAddr;
@@ -19,13 +19,37 @@ struct Opts {
     job_check_interval_secs: u64,
 }
 
+const HELP_TEMPLATE: &str = r#"██╗  ██╗██████╗  ██████╗
+██║  ██║██╔══██╗██╔════╝
+███████║██████╔╝██║
+██╔══██║██╔═══╝ ██║
+██║  ██║██║     ╚██████╗
+╚═╝  ╚═╝╚═╝      ╚═════╝
+
+{before-help}{about-with-newline}{usage-heading} {usage}
+
+{all-args}{after-help}
+"#;
+
+fn apply_help_template_recursively(cmd: &mut clap::Command) {
+    let mut owned = std::mem::take(cmd);
+    owned = owned.help_template(HELP_TEMPLATE);
+    for sub in owned.get_subcommands_mut() {
+        apply_help_template_recursively(sub);
+    }
+    *cmd = owned;
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::builder()
         .filter_level(LevelFilter::Debug)
         .init();
 
-    let opts = Opts::parse();
+    let mut cmd = Opts::command();
+    apply_help_template_recursively(&mut cmd);
+    let matches = cmd.get_matches();
+    let opts = Opts::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     let db = state::db::HostStore::open(opts.database_path).await?;
     let server_addr: SocketAddr = "127.0.0.1:50056".parse()?;
 

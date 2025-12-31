@@ -17,9 +17,32 @@ use proto::ListJobsUnitResponse;
 use std::io::Write;
 use std::path::PathBuf;
 
+const HELP_TEMPLATE: &str = r#"██╗  ██╗██████╗  ██████╗
+██║  ██║██╔══██╗██╔════╝
+███████║██████╔╝██║
+██╔══██║██╔═══╝ ██║
+██║  ██║██║     ╚██████╗
+╚═╝  ╚═╝╚═╝      ╚═════╝
+
+{before-help}{about-with-newline}{usage-heading} {usage}
+
+{all-args}{after-help}
+"#;
+
+fn apply_help_template_recursively(cmd: &mut clap::Command) {
+    let mut owned = std::mem::take(cmd);
+    owned = owned.help_template(HELP_TEMPLATE);
+    for sub in owned.get_subcommands_mut() {
+        apply_help_template_recursively(sub);
+    }
+    *cmd = owned;
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let matches = Cli::command().get_matches();
+    let mut cmd = Cli::command();
+    apply_help_template_recursively(&mut cmd);
+    let matches = cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     let submit_filters = submit_filters_from_matches(&matches);
     match cli.cmd {
