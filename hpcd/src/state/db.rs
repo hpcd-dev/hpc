@@ -1,14 +1,12 @@
-use futures_util::TryStreamExt;
-
 use sqlx::{
-    Row, Sqlite, SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
-use std::collections::HashMap;
 use std::{net::IpAddr, path::Path, str::FromStr, time::Duration};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Address for a host: either hostname or IP.
@@ -22,7 +20,7 @@ pub enum Address {
 #[derive(Debug)]
 pub enum ParseSlurmVersionError {
     WrongFormat,              // not exactly 3 dot-separated parts
-    NotANumber(&'static str), // one part isn’t an integer
+    NotANumber, // one part isn’t an integer
 }
 
 /// Slurm version triplet.
@@ -48,26 +46,22 @@ impl FromStr for SlurmVersion {
             .next()
             .ok_or(ParseSlurmVersionError::WrongFormat)?
             .parse::<i64>()
-            .map_err(|_| ParseSlurmVersionError::NotANumber("major"))?;
+            .map_err(|_| ParseSlurmVersionError::NotANumber)?;
         let minor = parts
             .next()
             .ok_or(ParseSlurmVersionError::WrongFormat)?
             .parse::<i64>()
-            .map_err(|_| ParseSlurmVersionError::NotANumber("minor"))?;
+            .map_err(|_| ParseSlurmVersionError::NotANumber)?;
         let patch = parts
             .next()
             .ok_or(ParseSlurmVersionError::WrongFormat)?
             .parse::<i64>()
-            .map_err(|_| ParseSlurmVersionError::NotANumber("patch"))?;
+            .map_err(|_| ParseSlurmVersionError::NotANumber)?;
 
         if parts.next().is_some() {
             return Err(ParseSlurmVersionError::WrongFormat);
         }
-        Ok(SlurmVersion {
-            major: major,
-            minor: minor,
-            patch: patch,
-        })
+        Ok(SlurmVersion { major, minor, patch })
     }
 }
 /// Linux distribution info.
@@ -208,6 +202,7 @@ impl HostStore {
     }
 
     /// Open an in-memory store (handy for tests).
+    #[allow(dead_code)]
     pub async fn open_memory() -> Result<Self> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")?
             .create_if_missing(true)
@@ -491,7 +486,7 @@ impl HostStore {
         .bind(&host.distro.version)
         .bind(&host.kernel_version)
         .bind(now)
-        .bind(&host.port)
+        .bind(host.port)
         .bind(&host.identity_path)
         .bind(host.accounting_available)
         .bind(&host.default_base_path)
@@ -502,6 +497,7 @@ impl HostStore {
     }
 
     /// Delete a host by numeric id. Returns rows affected (0 or 1).
+    #[allow(dead_code)]
     pub async fn delete_host(&self, id: i64) -> Result<usize> {
         let res = sqlx::query("DELETE FROM hosts WHERE id = ?")
             .bind(id)
@@ -511,6 +507,7 @@ impl HostStore {
     }
 
     /// Delete by `hostid`. Returns rows affected (0 or 1).
+    #[allow(dead_code)]
     pub async fn delete_by_hostid(&self, hostid: &str) -> Result<usize> {
         let res = sqlx::query("DELETE FROM hosts WHERE hostid = ?")
             .bind(hostid)
@@ -520,6 +517,7 @@ impl HostStore {
     }
 
     /// Get a host by row id.
+    #[allow(dead_code)]
     pub async fn get_host(&self, id: i64) -> Result<Option<HostRecord>> {
         let row = sqlx::query("select * from hosts where id = ?")
             .bind(id)
@@ -538,6 +536,7 @@ impl HostStore {
     }
 
     /// Get by (username, hostname) or (username, ip).
+    #[allow(dead_code)]
     pub async fn get_by_user_and_address(
         &self,
         username: &str,
@@ -615,6 +614,7 @@ impl HostStore {
         };
         Ok(row.map(|r| r.try_get::<i64, _>("id").unwrap()))
     }
+    #[allow(dead_code)]
     pub async fn upsert_partition_by_hostid(
         &self,
         hostid: &str,
@@ -635,6 +635,7 @@ impl HostStore {
         RETURNING id;"#).bind(host_id).bind(&spec.name).bind(&info_text).fetch_one(&self.pool).await?;
         Ok(rec.try_get::<i64, _>("id")?)
     }
+    #[allow(dead_code)]
     pub async fn get_partition_by_hostid_and_name(
         &self,
         hostid: &str,
@@ -655,6 +656,7 @@ impl HostStore {
         .await?;
         Ok(row.map(row_to_partition))
     }
+    #[allow(dead_code)]
     pub async fn list_partitions_by_hostid(&self, hostid: &str) -> Result<Vec<PartitionRecord>> {
         let rows = sqlx::query(
             r#"
@@ -671,6 +673,7 @@ impl HostStore {
 
         Ok(rows.into_iter().map(row_to_partition).collect())
     }
+    #[allow(dead_code)]
     pub async fn replace_partitions_by_hostid(
         &self,
         hostid: &str,
@@ -707,6 +710,7 @@ impl HostStore {
         Ok(())
     }
     /// fetch a host (by hostid) along with all its partitions
+    #[allow(dead_code)]
     pub async fn get_host_with_partitions_by_hostid(
         &self,
         hostid: &str,
@@ -806,11 +810,7 @@ impl HostStore {
         Ok(rows.into_iter().map(row_to_job).collect())
     }
 
-    pub async fn mark_job_completed(
-        &self,
-        id: i64,
-        terminal_state: Option<&str>,
-    ) -> Result<()> {
+    pub async fn mark_job_completed(&self, id: i64, terminal_state: Option<&str>) -> Result<()> {
         let now = now_rfc3339();
         sqlx::query(
             r#"
@@ -853,10 +853,7 @@ fn row_to_host(row: sqlx::sqlite::SqliteRow) -> HostRecord {
         Address::Hostname("<unknown>".into())
     };
 
-    let accounting_available = row
-        .try_get::<i64, _>("accounting_available")
-        .unwrap_or(0)
-        != 0;
+    let accounting_available = row.try_get::<i64, _>("accounting_available").unwrap_or(0) != 0;
     HostRecord {
         id: row.try_get("id").unwrap(),
         hostid: row.try_get("hostid").unwrap(),
@@ -912,9 +909,8 @@ fn row_to_job(row: sqlx::sqlite::SqliteRow) -> JobRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::collections::HashMap;
     use std::net::IpAddr;
-    use std::str::FromStr;
 
     fn make_host(hostid: &str, username: &str, addr: Address) -> NewHost {
         NewHost {
@@ -1119,7 +1115,7 @@ mod tests {
             name: "gpu".into(),
             info: Some(serde_json::to_value(&info_map).unwrap()),
         };
-        let partition_id = db.upsert_partition_by_hostid(hostid, &spec).await.unwrap();
+        let _partition_id = db.upsert_partition_by_hostid(hostid, &spec).await.unwrap();
         let part = db
             .get_partition_by_hostid_and_name(hostid, "gpu")
             .await
@@ -1222,7 +1218,9 @@ mod tests {
         let job1_id = db.insert_job(&job1).await.unwrap();
         let job2_id = db.insert_job(&job2).await.unwrap();
 
-        db.mark_job_completed(job1_id, Some("FAILED")).await.unwrap();
+        db.mark_job_completed(job1_id, Some("FAILED"))
+            .await
+            .unwrap();
 
         let running = db.list_running_jobs().await.unwrap();
         assert_eq!(running.len(), 1);

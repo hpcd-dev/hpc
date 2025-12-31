@@ -1530,6 +1530,7 @@ dependencies = [
  "sha2",
  "shellexpand",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.17",
  "time",
  "tokio",

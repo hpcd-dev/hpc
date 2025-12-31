@@ -1,15 +1,8 @@
-use anyhow::Context;
 use clap::Parser;
 use log::LevelFilter;
 use proto::agent_server::AgentServer;
-use ssh::{SessionManager, SshParams};
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::time::Duration;
-use tokio_stream::{Stream, StreamExt};
-use tonic::Status;
 use tonic::transport::Server;
 
 mod agent;

@@ -23,7 +23,7 @@ pub fn resolve_relative(remote_base: impl AsRef<Path>, relative_path: impl AsRef
         }
     }
 
-    normalize_path(&base.join(rel))
+    normalize_path(base.join(rel))
 }
 
 /// Normalize a path syntactically

@@ -1,16 +1,12 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::state::db::{ParseSlurmVersionError, SlurmVersion};
-
 pub const DETERMINE_SLURM_VERSION_CMD: &str = r#"(scontrol --version 2>/dev/null || srun --version 2>/dev/null || sinfo --version 2>/dev/null || squeue --version 2>/dev/null; )"#;
-
-pub const GATHER_PARTITIONS_SLURM_CMD: &str = "scontrol show partition -o";
 
 // SLURM PARTITION INFO GATHERING
 
 /// Represents a single SLURM partition as parsed from `scontrol show partition -o`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
     /// The `PartitionName` value.
@@ -19,6 +15,7 @@ pub struct Partition {
     pub fields: HashMap<String, String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ParseError {
     #[error("partition is missing required key: {0}")]
@@ -30,6 +27,7 @@ pub enum ParseError {
 /// Each non-empty line is expected to be a series of `key=value` tokens separated by whitespace.
 /// Only the first '=' in a token is considered the key/value delimiter to handle values like
 /// `TRESBillingWeights=CPU=1.0,Mem=0`.
+#[allow(dead_code)]
 pub fn parse_scontrol_partitions(input: &str) -> Result<Vec<Partition>, ParseError> {
     let mut parts = Vec::new();
 
@@ -54,6 +52,7 @@ pub fn parse_scontrol_partitions(input: &str) -> Result<Vec<Partition>, ParseErr
     Ok(parts)
 }
 
+#[allow(dead_code)]
 impl Partition {
     /// Get a raw field value as &str.
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -87,6 +86,7 @@ impl Partition {
 }
 
 /// Parse SLURM durations like "D-HH:MM:SS" or "HH:MM:SS".
+#[allow(dead_code)]
 fn parse_slurm_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("unlimited")
@@ -179,6 +179,7 @@ pub fn parse_sacct_states(output: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn sacct_output_is_running(output: &str) -> Option<bool> {
     let states = parse_sacct_states(output);
     if states.is_empty() {
@@ -212,14 +213,12 @@ pub fn sacct_terminal_state(output: &str) -> Option<String> {
     if normalized.iter().all(|state| state == "COMPLETED") {
         return Some("COMPLETED".to_string());
     }
-    normalized
-        .into_iter()
-        .find(|state| state != "COMPLETED")
+    normalized.into_iter().find(|state| state != "COMPLETED")
 }
 
 fn normalize_slurm_state(state: &str) -> String {
     let token = state
-        .split(|c| c == '+' || c == ':' || c == '(')
+        .split(['+', ':', '('])
         .next()
         .unwrap_or(state)
         .trim();
@@ -262,9 +261,9 @@ fn is_slurm_state_terminal(state: &str) -> bool {
 // returns a command to be executed on cluster to submit the job
 pub fn path_to_sbatch_command(p: &str, remote_base_path: Option<&str>) -> String {
     if let Some(chdir_path) = remote_base_path {
-        return format!("sbatch --chdir {} {}", chdir_path, p);
+        format!("sbatch --chdir {} {}", chdir_path, p)
     } else {
-        return format!("sbatch {}", p);
+        format!("sbatch {}", p)
     }
 }
 
@@ -379,10 +378,7 @@ PartitionName=gpu_bynode_q5 AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Alloc
         AccountingStorageType = accounting_storage/slurmdbd
         "#;
         let disabled = "AccountingStorageType=none";
-        assert_eq!(
-            parse_accounting_enabled_from_scontrol(enabled),
-            Some(true)
-        );
+        assert_eq!(parse_accounting_enabled_from_scontrol(enabled), Some(true));
         assert_eq!(
             parse_accounting_enabled_from_scontrol(disabled),
             Some(false)

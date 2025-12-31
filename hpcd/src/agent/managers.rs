@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::str::FromStr;
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
 pub enum WorkloadManager {
     Slurm,
