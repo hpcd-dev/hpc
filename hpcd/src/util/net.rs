@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use std::{io, net::SocketAddr};
 use thiserror::Error as ThisError;
 use tokio::net::lookup_host;

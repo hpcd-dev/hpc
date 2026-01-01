@@ -1,11 +1,15 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use clap::{CommandFactory, FromArgMatches, Parser};
 use log::LevelFilter;
 use proto::agent_server::AgentServer;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 use tokio::time::Duration;
 use tonic::transport::Server;
 
 mod agent;
+mod config;
 mod ssh;
 mod state;
 mod util;
@@ -13,10 +17,8 @@ mod util;
 #[derive(Parser)]
 #[command(version,about,long_about = None)]
 struct Opts {
-    #[arg(short, long)]
-    database_path: String,
-    #[arg(long, default_value_t = 5, value_name = "SECONDS")]
-    job_check_interval_secs: u64,
+    #[arg(short, long, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 const HELP_TEMPLATE: &str = r#"██╗  ██╗██████╗  ██████╗
@@ -50,11 +52,15 @@ async fn main() -> anyhow::Result<()> {
     apply_help_template_recursively(&mut cmd);
     let matches = cmd.get_matches();
     let opts = Opts::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
-    let db = state::db::HostStore::open(opts.database_path).await?;
+    let config = config::load(opts.config)?;
+    config::ensure_database_dir(&config.database_path)?;
+    let db = state::db::HostStore::open(&config.database_path).await?;
     let server_addr: SocketAddr = "127.0.0.1:50056".parse()?;
 
     let svc = agent::AgentSvc::new(db);
-    svc.spawn_job_checker(Duration::from_secs(opts.job_check_interval_secs));
+    svc.spawn_job_checker(Duration::from_secs(
+        config.job_check_interval_secs,
+    ));
     println!("server listening on {}", server_addr);
     Server::builder()
         .add_service(AgentServer::new(svc))

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 //! Sync planning utilities for SSH file synchronization.
 //!
 //! This module builds a deterministic, testable plan that enumerates local files,

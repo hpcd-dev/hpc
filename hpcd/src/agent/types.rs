@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use proto::{StreamEvent, SubmitStreamEvent};
 use std::pin::Pin;
 use thiserror::Error as ThisError;
