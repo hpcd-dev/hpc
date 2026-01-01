@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use anyhow::{Context, Result, anyhow};
 use proto::{MfaAnswer, SubmitStreamEvent};
 use russh_sftp::client::SftpSession;

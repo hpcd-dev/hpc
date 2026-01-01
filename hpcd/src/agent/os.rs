@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use thiserror::Error as ThisError;
 pub const GATHER_OS_INFO_CMD: &str = r#"sh -c '. /etc/os-release 2>/dev/null || . /usr/lib/os-release 2>/dev/null; printf "%s\n" "${ID:-unknown}" "${VERSION_ID:-${BUILD_ID:-unknown}}" "$(uname -r)"'"#;
 

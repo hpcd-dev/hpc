@@ -32,7 +32,20 @@ Submitting jobs to an HPC cluster usually means repeatedly doing the same glue w
 - Track jobs and retrieve artifacts: `hpc job list/get/retrieve`.
 
 ## Installation
-Packaging is TBD. For now, build from source:
+
+### Homebrew (macOS + Linux)
+
+```bash
+brew install <tap>/hpc
+brew services start hpc
+```
+
+This installs both `hpc` (CLI) and `hpcd` (daemon). `brew services` runs the `hpcd` daemon for your user. Edit the config file in the standard config directory before starting:
+
+- macOS: `~/Library/Application Support/hpcd/hpcd.toml`
+- Linux: `~/.config/hpcd/hpcd.toml`
+
+### Build from source
 
 - Install a Rust toolchain that supports Edition 2024.
 - Build the workspace: `cargo build`
@@ -42,13 +55,31 @@ Packaging is TBD. For now, build from source:
 
 ## Minimal Usage
 
-### 1) Start the daemon
+### 1) Configure + start the daemon
 
 The daemon keeps state (clusters, jobs) in SQLite.
 
-```bash
-hpcd --database-path ./hpc.db
+Create a config file in the standard config directory:
+
+- macOS: `~/Library/Application Support/hpcd/hpcd.toml`
+- Linux: `~/.config/hpcd/hpcd.toml`
+
+If `database_path` is omitted, it defaults to the standard data directory:
+- macOS: `~/Library/Application Support/hpcd/hpcd.sqlite`
+- Linux: `~/.local/share/hpcd/hpcd.sqlite`
+
+Example:
+
+```toml
+job_check_interval_secs = 5
+# database_path = "/custom/path/hpcd.sqlite"
 ```
+
+```bash
+hpcd
+```
+Use `--config /path/to/hpcd.toml` to point at a nonstandard config file.
+If installed via Homebrew, `brew services start hpc` runs `hpcd` in the background.
 
 ### 2) Add a cluster
 
@@ -96,9 +127,13 @@ Notes:
 # build everything
 cargo build
 
-# run the daemon
-cargo run -p hpcd -- --database-path ./hpc.db
+# run the daemon (reads config from standard directories)
+cargo run -p hpcd
 
 # use the client
 cargo run -p cli -- --help
 ```
+
+## License
+
+GNU Affero General Public License v3.0 (AGPL-3.0-only). See `LICENSE`.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use crate::agent::add_cluster::{
     normalize_default_base_path, parse_add_cluster_host, parse_add_cluster_port, resolve_host_addr,
 };

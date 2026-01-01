@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use std::path::{Component, Path, PathBuf};
 
 /// takes a base path and a relative path and joins them, additionally normalizing the path,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Alex Sizykh
+
 use crate::agent::types::AgentSvcError;
 use crate::ssh::{SessionManager, SshParams};
 use crate::state::db::{Address, HostRecord};
