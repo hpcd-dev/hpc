@@ -265,8 +265,9 @@ impl HostStore {
         // Other helpful indexes
         sqlx::query(
             r#"
+            DROP INDEX IF EXISTS idx_hosts_user_addr;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_user_addr
-              ON hosts(username, COALESCE(hostname, ip));
+              ON hosts(username, COALESCE(hostname, ip), port);
             CREATE INDEX IF NOT EXISTS idx_hosts_hostname ON hosts(hostname);
             CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts(ip);
             CREATE INDEX IF NOT EXISTS idx_hosts_username ON hosts(username);
@@ -464,7 +465,7 @@ impl HostStore {
 
     /// Upsert priority:
     /// 1) If a row with `name` exists, update it.
-    /// 2) Else, if a row with (username, address) exists, update it and set/replace name.
+    /// 2) Else, if a row with (username, address, port) exists, update it and set/replace name.
     /// 3) Else, insert a new row.
     pub async fn upsert_host(&self, host: &NewHost) -> Result<i64> {
         if let Some(id) = self.find_id_by_name(&host.name).await? {
@@ -472,7 +473,7 @@ impl HostStore {
             return Ok(id);
         }
         if let Some(id) = self
-            .find_id_by_user_and_address(&host.username, &host.address)
+            .find_id_by_user_and_address(&host.username, &host.address, host.port)
             .await?
         {
             self.update_host(id, host).await?;
@@ -576,26 +577,29 @@ impl HostStore {
         Ok(row.map(row_to_host))
     }
 
-    /// Get by (username, hostname) or (username, ip).
+    /// Get by (username, hostname, port) or (username, ip, port).
     #[allow(dead_code)]
     pub async fn get_by_user_and_address(
         &self,
         username: &str,
         address: &Address,
+        port: u16,
     ) -> Result<Option<HostRecord>> {
         let row = match address {
             Address::Hostname(h) => {
-                sqlx::query("SELECT * FROM hosts WHERE username = ? AND hostname = ?")
+                sqlx::query("SELECT * FROM hosts WHERE username = ? AND hostname = ? AND port = ?")
                     .bind(username)
                     .bind(h)
+                    .bind(port)
                     .fetch_optional(&self.pool)
                     .await?
             }
             Address::Ip(ip) => {
                 let ip_s = ip.to_string();
-                sqlx::query("SELECT * FROM hosts WHERE username = ? AND ip = ?")
+                sqlx::query("SELECT * FROM hosts WHERE username = ? AND ip = ? AND port = ?")
                     .bind(username)
                     .bind(&ip_s)
+                    .bind(port)
                     .fetch_optional(&self.pool)
                     .await?
             }
@@ -635,20 +639,25 @@ impl HostStore {
         &self,
         username: &str,
         address: &Address,
+        port: u16,
     ) -> Result<Option<i64>> {
         let row = match address {
             Address::Hostname(h) => {
-                sqlx::query("SELECT id FROM hosts WHERE username = ? AND hostname = ? LIMIT 1")
+                sqlx::query(
+                    "SELECT id FROM hosts WHERE username = ? AND hostname = ? AND port = ? LIMIT 1",
+                )
                     .bind(username)
                     .bind(h)
+                    .bind(port)
                     .fetch_optional(&self.pool)
                     .await?
             }
             Address::Ip(ip) => {
                 let ip_s = ip.to_string();
-                sqlx::query("SELECT id FROM hosts WHERE username = ? AND ip = ? LIMIT 1")
+                sqlx::query("SELECT id FROM hosts WHERE username = ? AND ip = ? AND port = ? LIMIT 1")
                     .bind(username)
                     .bind(&ip_s)
+                    .bind(port)
                     .fetch_optional(&self.pool)
                     .await?
             }
@@ -1109,9 +1118,9 @@ mod tests {
             _ => panic!("expected IP address"),
         }
 
-        // Lookup by (username, ip)
+        // Lookup by (username, ip, port)
         let got2 = db
-            .get_by_user_and_address("alice", &Address::Ip(ip))
+            .get_by_user_and_address("alice", &Address::Ip(ip), 22)
             .await
             .unwrap();
         assert!(got2.is_some());

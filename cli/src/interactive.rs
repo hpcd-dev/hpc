@@ -14,7 +14,7 @@ use std::net::IpAddr;
 
 const DEFAULT_SSH_PORT: u32 = 22;
 const DEFAULT_IDENTITY_PATH: &str = "~/.ssh/id_ed25519";
-const INPUT_COLOR: Color = Color::Magenta;
+const HINT_COLOR: Color = Color::DarkGrey;
 
 #[derive(Debug)]
 pub struct ResolvedAddClusterArgs {
@@ -102,7 +102,7 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
                     if args.headless {
                         bail!("--username is required in headless mode");
                     }
-                    prompt_required("Username")?
+                    prompt_required("Username", "SSH login user for the cluster")?
                 }
             },
         },
@@ -111,13 +111,14 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
     let name = match name {
         Some(value) => value,
         None => {
-            let default_name = default_name_for_host(hostname.as_deref(), ip.as_deref())?;
             if args.headless {
-                default_name
+                default_name_for_host(hostname.as_deref(), ip.as_deref())?
             } else {
+                let default_name = generate_random_name();
                 prompt_with_default(
-                    "Name (you will use this in other commands, e.g. gpu01)",
+                    "Name",
                     &default_name,
+                    "Friendly name used in other commands (e.g. gpu01).",
                 )?
             }
         }
@@ -130,7 +131,7 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
             if args.headless {
                 DEFAULT_SSH_PORT
             } else {
-                prompt_port(DEFAULT_SSH_PORT)?
+                prompt_port(DEFAULT_SSH_PORT, "SSH port for the cluster")?
             }
         }
         (Some(_), Some(_)) => unreachable!("port conflicts handled earlier"),
@@ -142,7 +143,11 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
             if args.headless {
                 DEFAULT_IDENTITY_PATH.to_string()
             } else {
-                prompt_with_default("Identity path", DEFAULT_IDENTITY_PATH)?
+                prompt_with_default(
+                    "Identity path",
+                    DEFAULT_IDENTITY_PATH,
+                    "SSH private key path used for authentication.",
+                )?
             }
         }
     };
@@ -153,7 +158,10 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
             if args.headless {
                 None
             } else {
-                prompt_optional("Default base path")?
+                prompt_optional(
+                    "Default base path",
+                    "Remote base folder for projects (optional).",
+                )?
             }
         }
     };
@@ -203,7 +211,10 @@ fn ensure_tty_for_prompt() -> anyhow::Result<()> {
 
 fn prompt_destination() -> anyhow::Result<ParsedDestination> {
     loop {
-        let input = prompt_line("Destination ([user@]host[:port]): ")?;
+        let input = prompt_line(
+            "Destination: ",
+            "SSH destination in [user@]host[:port] form.",
+        )?;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             eprintln!("Destination is required.");
@@ -304,9 +315,9 @@ fn generate_random_name() -> String {
     format!("{adjective}_{scientist}")
 }
 
-fn prompt_required(label: &str) -> anyhow::Result<String> {
+fn prompt_required(label: &str, hint: &str) -> anyhow::Result<String> {
     loop {
-        let input = prompt_line(&format!("{label}: "))?;
+        let input = prompt_line(&format!("{label}: "), hint)?;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             eprintln!("{label} is required.");
@@ -316,8 +327,9 @@ fn prompt_required(label: &str) -> anyhow::Result<String> {
     }
 }
 
-fn prompt_with_default(label: &str, default: &str) -> anyhow::Result<String> {
-    let input = prompt_line_with_prefill(&format!("{label}: "), default)?;
+fn prompt_with_default(label: &str, default: &str, hint: &str) -> anyhow::Result<String> {
+    let hint = format!("{hint} (default: {default})");
+    let input = prompt_line_with_default(&format!("{label}: "), &hint, Some(default))?;
     let trimmed = input.trim();
     if trimmed.is_empty() {
         Ok(default.to_string())
@@ -326,8 +338,8 @@ fn prompt_with_default(label: &str, default: &str) -> anyhow::Result<String> {
     }
 }
 
-fn prompt_optional(label: &str) -> anyhow::Result<Option<String>> {
-    let input = prompt_line_with_prefill(&format!("{label}: "), "")?;
+fn prompt_optional(label: &str, hint: &str) -> anyhow::Result<Option<String>> {
+    let input = prompt_line(&format!("{label}: "), hint)?;
     let trimmed = input.trim();
     if trimmed.is_empty() {
         Ok(None)
@@ -336,9 +348,11 @@ fn prompt_optional(label: &str) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn prompt_port(default: u32) -> anyhow::Result<u32> {
+fn prompt_port(default: u32, hint: &str) -> anyhow::Result<u32> {
+    let hint = format!("{hint} (default: {default})");
+    let default_str = default.to_string();
     loop {
-        let input = prompt_line_with_prefill("Port: ", &default.to_string())?;
+        let input = prompt_line_with_default("Port: ", &hint, Some(default_str.as_str()))?;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Ok(default);
@@ -350,21 +364,28 @@ fn prompt_port(default: u32) -> anyhow::Result<u32> {
     }
 }
 
-fn prompt_line(prompt: &str) -> anyhow::Result<String> {
-    prompt_line_with_prefill(prompt, "")
+fn prompt_line(prompt: &str, hint: &str) -> anyhow::Result<String> {
+    prompt_line_with_default(prompt, hint, None)
 }
 
-fn prompt_line_with_prefill(prompt: &str, initial: &str) -> anyhow::Result<String> {
+fn prompt_line_with_default(
+    prompt: &str,
+    hint: &str,
+    default: Option<&str>,
+) -> anyhow::Result<String> {
     let _guard = RawModeGuard::enter()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, cursor::MoveToColumn(0))?;
-    let mut editor = LineEditor::new(prompt, 0, initial);
+    let mut editor = LineEditor::new(prompt, 0, hint, default);
     editor.render(&mut stdout)?;
 
     loop {
         match event::read()? {
             Event::Key(key) => match key.code {
                 KeyCode::Enter => {
+                    if editor.apply_default_if_empty() {
+                        editor.render(&mut stdout)?;
+                    }
                     execute!(stdout, ResetColor, Print("\r\n"))?;
                     break;
                 }
@@ -427,27 +448,32 @@ impl Drop for RawModeGuard {
 struct LineEditor {
     prompt: String,
     prompt_len: u16,
+    hint: String,
+    default_value: Option<String>,
     start_col: u16,
     buffer: Vec<char>,
     cursor: usize,
+    has_typed: bool,
 }
 
 impl LineEditor {
-    fn new(prompt: &str, start_col: u16, initial: &str) -> Self {
-        let buffer: Vec<char> = initial.chars().collect();
-        let cursor = buffer.len();
+    fn new(prompt: &str, start_col: u16, hint: &str, default: Option<&str>) -> Self {
         Self {
             prompt: prompt.to_string(),
             prompt_len: prompt.len().min(u16::MAX as usize) as u16,
+            hint: hint.to_string(),
+            default_value: default.map(|value| value.to_string()),
             start_col,
-            buffer,
-            cursor,
+            buffer: Vec::new(),
+            cursor: 0,
+            has_typed: false,
         }
     }
 
     fn insert(&mut self, ch: char) {
         self.buffer.insert(self.cursor, ch);
         self.cursor += 1;
+        self.has_typed = true;
     }
 
     fn backspace(&mut self) {
@@ -456,6 +482,7 @@ impl LineEditor {
         }
         self.cursor -= 1;
         self.buffer.remove(self.cursor);
+        self.has_typed = true;
     }
 
     fn delete(&mut self) {
@@ -463,6 +490,7 @@ impl LineEditor {
             return;
         }
         self.buffer.remove(self.cursor);
+        self.has_typed = true;
     }
 
     fn move_left(&mut self) {
@@ -492,10 +520,30 @@ impl LineEditor {
             cursor::MoveToColumn(self.start_col),
             terminal::Clear(ClearType::UntilNewLine),
             Print(&self.prompt),
-            SetForegroundColor(INPUT_COLOR),
-            Print(buffer_string),
-            ResetColor,
         )?;
+        if self.has_typed {
+            execute!(stdout, Print(buffer_string))?;
+        } else if buffer_string.is_empty() {
+            if !self.hint.is_empty() {
+                execute!(
+                    stdout,
+                    SetForegroundColor(HINT_COLOR),
+                    Print(&self.hint),
+                    ResetColor,
+                )?;
+            }
+        } else {
+            execute!(stdout, Print(&buffer_string))?;
+            if !self.hint.is_empty() {
+                execute!(
+                    stdout,
+                    Print(" "),
+                    SetForegroundColor(HINT_COLOR),
+                    Print(&self.hint),
+                    ResetColor,
+                )?;
+            }
+        }
         let cursor_col = self
             .start_col
             .saturating_add(self.prompt_len)
@@ -503,6 +551,19 @@ impl LineEditor {
         execute!(stdout, cursor::MoveToColumn(cursor_col))?;
         stdout.flush()?;
         Ok(())
+    }
+
+    fn apply_default_if_empty(&mut self) -> bool {
+        if !self.buffer.is_empty() {
+            return false;
+        }
+        let Some(default_value) = self.default_value.as_ref() else {
+            return false;
+        };
+        self.buffer.extend(default_value.chars());
+        self.cursor = self.buffer.len();
+        self.has_typed = true;
+        true
     }
 
     fn into_string(self) -> String {
