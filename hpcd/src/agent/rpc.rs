@@ -350,8 +350,7 @@ impl Agent for AgentSvc {
         };
         let filters = build_sync_filters(filters)?;
 
-        let (evt_tx, evt_rx) =
-            tokio::sync::mpsc::channel::<Result<SubmitStreamEvent, Status>>(64);
+        let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<SubmitStreamEvent, Status>>(64);
         let (mfa_tx, mut mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(16);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -411,7 +410,10 @@ impl Agent for AgentSvc {
             return Err(Status::cancelled("client disconnected"));
         }
 
-        match mgr.ensure_connected_submit(&evt_tx.clone(), &mut mfa_rx).await {
+        match mgr
+            .ensure_connected_submit(&evt_tx.clone(), &mut mfa_rx)
+            .await
+        {
             Ok(_) => {}
             Err(e) => {
                 return Err(Status::internal(format!(

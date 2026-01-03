@@ -3,8 +3,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use proto::{
-    MfaAnswer, MfaPrompt, Prompt, StreamEvent, SubmitStreamEvent, stream_event,
-    submit_stream_event,
+    MfaAnswer, MfaPrompt, Prompt, StreamEvent, SubmitStreamEvent, stream_event, submit_stream_event,
 };
 use russh::client::{AuthResult, KeyboardInteractiveAuthResponse};
 use russh::keys::PrivateKeyWithHashAlg;

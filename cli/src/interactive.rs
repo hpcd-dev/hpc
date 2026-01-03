@@ -37,11 +37,10 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
     let default_base_path = normalize_option(args.default_base_path);
     let env_username = default_username();
 
-    let parsed_destination = destination
-        .as_deref()
-        .map(parse_destination)
-        .transpose()?;
-    let dest_username = parsed_destination.as_ref().and_then(|d| d.username.as_ref());
+    let parsed_destination = destination.as_deref().map(parse_destination).transpose()?;
+    let dest_username = parsed_destination
+        .as_ref()
+        .and_then(|d| d.username.as_ref());
     let dest_port = parsed_destination.as_ref().and_then(|d| d.port);
 
     if parsed_destination.is_some() && (hostname.is_some() || ip.is_some()) {
@@ -256,7 +255,10 @@ fn parse_destination(input: &str) -> anyhow::Result<ParsedDestination> {
         if host.trim().is_empty() {
             bail!("destination host is required");
         }
-        (host.trim().to_string(), Some(parse_destination_port(port_str)?))
+        (
+            host.trim().to_string(),
+            Some(parse_destination_port(port_str)?),
+        )
     } else {
         (host_part.to_string(), None)
     };
@@ -294,14 +296,8 @@ fn default_hostid_for_host(hostname: Option<&str>, ip: Option<&str>) -> anyhow::
 
 fn generate_random_hostid() -> String {
     let mut rng = rand::rng();
-    let adjective = ADJECTIVES
-        .choose(&mut rng)
-        .copied()
-        .unwrap_or("curious");
-    let scientist = SCIENTISTS
-        .choose(&mut rng)
-        .copied()
-        .unwrap_or("einstein");
+    let adjective = ADJECTIVES.choose(&mut rng).copied().unwrap_or("curious");
+    let scientist = SCIENTISTS.choose(&mut rng).copied().unwrap_or("einstein");
     format!("{adjective}_{scientist}")
 }
 
@@ -512,49 +508,14 @@ impl LineEditor {
 }
 
 const ADJECTIVES: &[&str] = &[
-    "bold",
-    "brisk",
-    "calm",
-    "clever",
-    "curious",
-    "daring",
-    "eager",
-    "gentle",
-    "grand",
-    "happy",
-    "jolly",
-    "kind",
-    "lively",
-    "mighty",
-    "noble",
-    "proud",
-    "quiet",
-    "rapid",
-    "sharp",
-    "witty",
+    "bold", "brisk", "calm", "clever", "curious", "daring", "eager", "gentle", "grand", "happy",
+    "jolly", "kind", "lively", "mighty", "noble", "proud", "quiet", "rapid", "sharp", "witty",
 ];
 
 const SCIENTISTS: &[&str] = &[
-    "bohr",
-    "curie",
-    "darwin",
-    "einstein",
-    "fermi",
-    "feynman",
-    "gauss",
-    "galilei",
-    "goodall",
-    "hawking",
-    "kepler",
-    "lovelace",
-    "mendel",
-    "newton",
-    "noether",
-    "planck",
-    "tesla",
-    "turing",
-    "weber",
-    "wilson",
+    "bohr", "curie", "darwin", "einstein", "fermi", "feynman", "gauss", "galilei", "goodall",
+    "hawking", "kepler", "lovelace", "mendel", "newton", "noether", "planck", "tesla", "turing",
+    "weber", "wilson",
 ];
 
 #[cfg(test)]

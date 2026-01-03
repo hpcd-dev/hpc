@@ -36,7 +36,8 @@ Submitting jobs to an HPC cluster usually means repeatedly doing the same glue w
 ### Homebrew (macOS + Linux)
 
 ```bash
-brew install <tap>/hpc
+brew tap hpcd-dev/hpc
+brew install hpc
 brew services start hpc
 ```
 
@@ -53,57 +54,9 @@ This installs both `hpc` (CLI) and `hpcd` (daemon). `brew services` runs the `hp
   - `cargo install --path cli` (installs `hpc`)
   - `cargo install --path hpcd` (installs `hpcd`)
 
-## Minimal Usage
 
-### 1) Configure + start the daemon
 
-The daemon keeps state (clusters, jobs) in SQLite.
 
-Create a config file in the standard config directory:
-
-- macOS: `~/Library/Application Support/hpcd/hpcd.toml`
-- Linux: `~/.config/hpcd/hpcd.toml`
-
-If `database_path` is omitted, it defaults to the standard data directory:
-- macOS: `~/Library/Application Support/hpcd/hpcd.sqlite`
-- Linux: `~/.local/share/hpcd/hpcd.sqlite`
-
-Example:
-
-```toml
-job_check_interval_secs = 5
-# database_path = "/custom/path/hpcd.sqlite"
-```
-
-```bash
-hpcd
-```
-Use `--config /path/to/hpcd.toml` to point at a nonstandard config file.
-If installed via Homebrew, `brew services start hpc` runs `hpcd` in the background.
-
-### 2) Add a cluster
-
-Use a destination in ssh format (`[user@]host[:port]`). `--default-base-path` is where run folders will be created by default.
-
-```bash
-hpc cluster add \
-  alice@login.example.edu:22 \
-  --hostid login.example.edu \
-  --identity-path ~/.ssh/id_ed25519 \
-  --default-base-path /home/alice/hpc-runs
-```
-
-### 3) Submit a job
-
-Submit a local directory that contains an `sbatch` script (either pass it explicitly, or let `hpc` discover it). For non-interactive usage, add `--headless`.
-
-```bash
-hpc submit mycluster ./test_project submit_job.sbatch --headless
-```
-
-Notes:
-- `local_path` must be a directory; `.sbatch` scripts are searched recursively under it.
-- `--remote-path` is optional; if provided and relative, it’s resolved under `default_base_path`.
 
 ## How It Works
 
