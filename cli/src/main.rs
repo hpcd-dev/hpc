@@ -275,8 +275,16 @@ async fn main() -> anyhow::Result<()> {
                     .await?
                 }
                 ClusterCmd::Delete(args) => {
+                    let response = fetch_list_clusters(&mut client, "").await?;
+                    if !response
+                        .clusters
+                        .iter()
+                        .any(|cluster| cluster.name == args.name)
+                    {
+                        bail!("cluster name '{}' is not known", args.name);
+                    }
                     println!(
-                        "WARNING: This will delete cluster '{}' and all its job records from the local database.",
+                        "WARNING:\nThis will delete cluster '{}' and all its job records from the local database.",
                         args.name
                     );
                     println!("Any active SSH sessions for this cluster will be closed.");
@@ -293,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     let response = send_delete_cluster(&mut client, &args.name).await?;
                     if !response.deleted {
-                        bail!("cluster '{}' not found", args.name);
+                        bail!("cluster name '{}' is not known", args.name);
                     }
                     println!("Cluster '{}' deleted.", args.name);
                 }
