@@ -23,7 +23,9 @@ pub async fn collect_mfa_answers(mfa: &MfaPrompt) -> anyhow::Result<MfaAnswer> {
     Ok(MfaAnswer { responses })
 }
 
-pub async fn collect_mfa_answers_transient(mfa: &MfaPrompt) -> anyhow::Result<MfaAnswer> {
+pub async fn collect_mfa_answers_transient(
+    mfa: &MfaPrompt,
+) -> anyhow::Result<(MfaAnswer, usize)> {
     let mut lines = 0usize;
     eprintln!();
     lines += 1;
@@ -46,8 +48,7 @@ pub async fn collect_mfa_answers_transient(mfa: &MfaPrompt) -> anyhow::Result<Mf
         lines += prompt_lines;
     }
 
-    clear_prompt_lines(lines)?;
-    Ok(MfaAnswer { responses })
+    Ok((MfaAnswer { responses }, lines))
 }
 
 async fn prompt_value(prompt: &str, echo: bool) -> anyhow::Result<String> {
@@ -100,4 +101,8 @@ fn clear_prompt_lines(lines: usize) -> anyhow::Result<()> {
     crossterm::execute!(stdout, crossterm::cursor::MoveToColumn(0))?;
     stdout.flush()?;
     Ok(())
+}
+
+pub fn clear_transient_mfa(lines: usize) -> anyhow::Result<()> {
+    clear_prompt_lines(lines)
 }

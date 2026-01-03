@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Alex Sizykh
 
-use crate::mfa::collect_mfa_answers_transient;
+use crate::mfa::{clear_transient_mfa, collect_mfa_answers_transient};
 use crate::stream::{
     SubmitStreamOutcome, ensure_exit_code, handle_stream_events, handle_submit_stream_events,
 };
@@ -375,6 +375,7 @@ pub async fn send_resolve_home_dir(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut exit_code = None;
+    let mut mfa_lines = 0usize;
     while let Some(item) = inbound.next().await {
         match item {
             Ok(event) => match event.event {
@@ -389,7 +390,8 @@ pub async fn send_resolve_home_dir(
                     break;
                 }
                 Some(stream_event::Event::Mfa(mfa)) => {
-                    let answers = collect_mfa_answers_transient(&mfa).await?;
+                    let (answers, lines) = collect_mfa_answers_transient(&mfa).await?;
+                    mfa_lines = mfa_lines.saturating_add(lines);
                     tx_mfa
                         .send(ResolveHomeDirRequest {
                             msg: Some(resolve_home_dir_request::Msg::Mfa(answers)),
@@ -415,6 +417,10 @@ pub async fn send_resolve_home_dir(
             String::from_utf8_lossy(&stderr).to_string()
         };
         bail!("failed to resolve remote home directory: {detail}");
+    }
+
+    if mfa_lines > 0 {
+        clear_transient_mfa(mfa_lines)?;
     }
 
     let home_raw =

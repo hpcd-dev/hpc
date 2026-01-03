@@ -68,10 +68,9 @@ async fn fetch_remote_home_dir(
     Ok(home.to_string())
 }
 
-async fn resolve_default_base_path(
-    sm: &crate::ssh::SessionManager,
-    name: &str,
+fn resolve_default_base_path(
     default_base_path: Option<String>,
+    home_dir: &str,
 ) -> Result<Option<String>, Status> {
     let default_base_path = default_base_path.and_then(|value| {
         let trimmed = value.trim();
@@ -83,21 +82,18 @@ async fn resolve_default_base_path(
     });
 
     let Some(raw) = default_base_path else {
-        let home = fetch_remote_home_dir(sm, name).await?;
-        return Ok(Some(home));
+        return Ok(Some(home_dir.to_string()));
     };
 
     if raw == "~" {
-        let home = fetch_remote_home_dir(sm, name).await?;
-        return Ok(Some(home));
+        return Ok(Some(home_dir.to_string()));
     }
 
     if let Some(suffix) = raw.strip_prefix("~/") {
-        let home = fetch_remote_home_dir(sm, name).await?;
         if suffix.is_empty() {
-            return Ok(Some(home));
+            return Ok(Some(home_dir.to_string()));
         }
-        let expanded = PathBuf::from(home).join(suffix);
+        let expanded = PathBuf::from(home_dir).join(suffix);
         return Ok(Some(expanded.to_string_lossy().into_owned()));
     }
 
@@ -954,6 +950,30 @@ impl Agent for AgentSvc {
                 return;
             };
 
+            let home_dir = match fetch_remote_home_dir(&sm, &name).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = evt_tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            let resolved_default_base_path =
+                match resolve_default_base_path(default_base_path, &home_dir) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = evt_tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+            let normalized_default_base_path =
+                match normalize_default_base_path(resolved_default_base_path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = evt_tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+
             let (out, err, code) = match sm
                 .exec_capture(crate::agent::managers::DETERMINE_HPC_WORKLOAD_MANAGERS_CMD)
                 .await
@@ -1158,22 +1178,6 @@ impl Agent for AgentSvc {
                 false
             });
 
-            let resolved_default_base_path =
-                match resolve_default_base_path(&sm, &name, default_base_path).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = evt_tx.send(Err(e)).await;
-                        return;
-                    }
-                };
-            let normalized_default_base_path =
-                match normalize_default_base_path(resolved_default_base_path) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = evt_tx.send(Err(e)).await;
-                        return;
-                    }
-                };
             if let Some(ref dbp) = normalized_default_base_path {
                 let command = format!("mkdir -p {}", dbp.to_string_lossy());
                 let (_, err, code) = match sm.exec_capture(&command).await {
