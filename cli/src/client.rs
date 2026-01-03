@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Alex Sizykh
 
+use crate::mfa::collect_mfa_answers_transient;
 use crate::stream::{
     SubmitStreamOutcome, ensure_exit_code, handle_stream_events, handle_submit_stream_events,
 };
@@ -9,13 +10,15 @@ use proto::agent_client::AgentClient;
 use proto::{
     AddClusterInit, AddClusterRequest, DeleteClusterRequest, DeleteClusterResponse,
     ListClustersRequest, ListClustersResponse, ListJobsRequest, ListJobsResponse, LsRequest,
-    LsRequestInit, RetrieveJobRequest, RetrieveJobRequestInit, SubmitPathFilterRule, SubmitRequest,
-    add_cluster_init, add_cluster_request,
+    LsRequestInit, ResolveHomeDirRequest, ResolveHomeDirRequestInit, RetrieveJobRequest,
+    RetrieveJobRequestInit, SubmitPathFilterRule, SubmitRequest, add_cluster_init,
+    add_cluster_request, resolve_home_dir_request, resolve_home_dir_request_init, stream_event,
 };
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tonic::{Request, transport::Channel};
 
 pub async fn send_ping(client: &mut AgentClient<Channel>) -> anyhow::Result<()> {
@@ -331,4 +334,94 @@ pub async fn send_add_cluster(
     })
     .await?;
     ensure_exit_code(exit_code, "on client side: received exit code")
+}
+
+pub async fn send_resolve_home_dir(
+    client: &mut AgentClient<Channel>,
+    name: &str,
+    username: &str,
+    hostname: &Option<String>,
+    ip: &Option<String>,
+    identity_path: Option<&str>,
+    port: u32,
+) -> anyhow::Result<String> {
+    let (tx_ans, rx_ans) = mpsc::channel::<ResolveHomeDirRequest>(16);
+    let outbound = ReceiverStream::new(rx_ans);
+    let host: resolve_home_dir_request_init::Host = match hostname {
+        Some(v) => resolve_home_dir_request_init::Host::Hostname(v.into()),
+        None => match ip {
+            Some(v) => resolve_home_dir_request_init::Host::Ipaddr(v.into()),
+            None => anyhow::bail!("both hostname and ip address can't be none"),
+        },
+    };
+    let identity_path_expanded = match identity_path {
+        Some(value) => Some(shellexpand::full(value)?.to_string()),
+        None => None,
+    };
+    let init = ResolveHomeDirRequestInit {
+        username: username.to_owned(),
+        host: Some(host),
+        identity_path: identity_path_expanded,
+        port,
+        name: Some(name.to_owned()),
+    };
+    let req = ResolveHomeDirRequest {
+        msg: Some(resolve_home_dir_request::Msg::Init(init)),
+    };
+    tx_ans.send(req).await?;
+    let response = client.resolve_home_dir(Request::new(outbound)).await?;
+    let mut inbound = response.into_inner();
+    let tx_mfa = tx_ans.clone();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    while let Some(item) = inbound.next().await {
+        match item {
+            Ok(event) => match event.event {
+                Some(stream_event::Event::Stdout(bytes)) => {
+                    stdout.extend_from_slice(&bytes);
+                }
+                Some(stream_event::Event::Stderr(bytes)) => {
+                    stderr.extend_from_slice(&bytes);
+                }
+                Some(stream_event::Event::ExitCode(code)) => {
+                    exit_code = Some(code);
+                    break;
+                }
+                Some(stream_event::Event::Mfa(mfa)) => {
+                    let answers = collect_mfa_answers_transient(&mfa).await?;
+                    tx_mfa
+                        .send(ResolveHomeDirRequest {
+                            msg: Some(resolve_home_dir_request::Msg::Mfa(answers)),
+                        })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("server closed while sending MFA answers"))?;
+                }
+                Some(stream_event::Event::Error(err)) => {
+                    bail!("server error: {err}");
+                }
+                None => {}
+            },
+            Err(status) => {
+                bail!("stream error: {status}");
+            }
+        }
+    }
+
+    if exit_code != Some(0) {
+        let detail = if stderr.is_empty() {
+            "unknown error".to_string()
+        } else {
+            String::from_utf8_lossy(&stderr).to_string()
+        };
+        bail!("failed to resolve remote home directory: {detail}");
+    }
+
+    let home_raw =
+        String::from_utf8(stdout).map_err(|e| anyhow::anyhow!("invalid UTF-8: {e}"))?;
+    let home = home_raw.trim();
+    if home.is_empty() {
+        bail!("remote home directory is empty");
+    }
+    Ok(home.to_string())
 }

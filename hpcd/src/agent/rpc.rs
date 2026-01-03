@@ -12,7 +12,7 @@ use crate::agent::service::AgentSvc;
 use crate::agent::submit::{resolve_remote_sbatch_path, resolve_submit_remote_path};
 use crate::agent::types::{AgentSvcError, OutStream, SubmitOutStream};
 use crate::ssh::sh_escape;
-use crate::state::db::HostStoreError;
+use crate::state::db::{Address, HostStoreError};
 use crate::util;
 use crate::util::remote_path::normalize_path;
 use proto::agent_server::Agent;
@@ -23,9 +23,116 @@ use proto::{
     StreamEvent, SubmitRequest, SubmitResult, SubmitStatus, SubmitStreamEvent, stream_event,
     submit_result, submit_status, submit_stream_event,
 };
-use std::path::PathBuf;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tonic::Status;
+
+async fn fetch_remote_home_dir(
+    sm: &crate::ssh::SessionManager,
+    name: &str,
+) -> Result<String, Status> {
+    let command = "printf '%s' \"$HOME\"";
+    let (out, err, code) = sm.exec_capture(command).await.map_err(|e| {
+        Status::aborted(format!(
+            "failed to resolve home directory on {name}: {e}"
+        ))
+    })?;
+    if code != 0 {
+        let err_message = String::from_utf8_lossy(&err);
+        let detail = if err_message.trim().is_empty() {
+            format!("exit code {code}")
+        } else {
+            err_message.trim().to_string()
+        };
+        return Err(Status::aborted(format!(
+            "failed to resolve home directory on {name}: {detail}"
+        )));
+    }
+    let home_raw = String::from_utf8(out).map_err(|e| {
+        Status::aborted(format!(
+            "failed to decode home directory for {name}: {e}"
+        ))
+    })?;
+    let home = home_raw.trim();
+    if home.is_empty() {
+        return Err(Status::aborted(format!(
+            "home directory is empty on {name}"
+        )));
+    }
+    if !Path::new(home).is_absolute() {
+        return Err(Status::aborted(format!(
+            "home directory for {name} is not absolute: {home}"
+        )));
+    }
+    Ok(home.to_string())
+}
+
+async fn resolve_default_base_path(
+    sm: &crate::ssh::SessionManager,
+    name: &str,
+    default_base_path: Option<String>,
+) -> Result<Option<String>, Status> {
+    let default_base_path = default_base_path.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let Some(raw) = default_base_path else {
+        let home = fetch_remote_home_dir(sm, name).await?;
+        return Ok(Some(home));
+    };
+
+    if raw == "~" {
+        let home = fetch_remote_home_dir(sm, name).await?;
+        return Ok(Some(home));
+    }
+
+    if let Some(suffix) = raw.strip_prefix("~/") {
+        let home = fetch_remote_home_dir(sm, name).await?;
+        if suffix.is_empty() {
+            return Ok(Some(home));
+        }
+        let expanded = PathBuf::from(home).join(suffix);
+        return Ok(Some(expanded.to_string_lossy().into_owned()));
+    }
+
+    if raw.starts_with('~') {
+        return Err(Status::invalid_argument(
+            "default_base_path must be absolute or start with '~/' (use '~' for the home directory)",
+        ));
+    }
+
+    Ok(Some(raw))
+}
+
+fn parse_resolve_home_host(
+    host: Option<proto::resolve_home_dir_request_init::Host>,
+) -> Result<Address, Status> {
+    let host = match host {
+        Some(v) => v,
+        None => return Err(Status::invalid_argument("empty host in initial message")),
+    };
+    match host {
+        proto::resolve_home_dir_request_init::Host::Hostname(v) => Ok(Address::Hostname(v)),
+        proto::resolve_home_dir_request_init::Host::Ipaddr(addr) => {
+            let ip: IpAddr = match addr.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(Status::invalid_argument(format!(
+                        "could not parse {} into ip address: {:?}",
+                        addr, e
+                    )));
+                }
+            };
+            Ok(Address::Ip(ip))
+        }
+    }
+}
 
 #[tonic::async_trait]
 impl Agent for AgentSvc {
@@ -33,6 +140,7 @@ impl Agent for AgentSvc {
     type RetrieveJobStream = OutStream;
     type SubmitStream = SubmitOutStream;
     type AddClusterStream = OutStream;
+    type ResolveHomeDirStream = OutStream;
 
     async fn ping(
         &self,
@@ -48,6 +156,104 @@ impl Agent for AgentSvc {
                 m
             ))),
         }
+    }
+
+    async fn resolve_home_dir(
+        &self,
+        request: tonic::Request<tonic::Streaming<proto::ResolveHomeDirRequest>>,
+    ) -> Result<tonic::Response<Self::ResolveHomeDirStream>, Status> {
+        log::debug!("resolving remote home directory");
+
+        let mut inbound = request.into_inner();
+        let init = inbound
+            .message()
+            .await
+            .map_err(|e| Status::unknown(format!("read error: {e}")))?
+            .ok_or_else(|| Status::invalid_argument("stream closed before init"))?;
+
+        let (username, host, identity_path, port, name) = match init.msg {
+            Some(proto::resolve_home_dir_request::Msg::Init(i)) => {
+                (i.username, i.host, i.identity_path, i.port, i.name)
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "first message must be init(username, host, port)",
+                ));
+            }
+        };
+
+        let addr = parse_resolve_home_host(host)?;
+        let port = parse_add_cluster_port(port)?;
+        let connection_addr = resolve_host_addr(&addr, port).await?;
+
+        let ssh_params = crate::ssh::SshParams {
+            username: username.clone(),
+            addr: connection_addr,
+            identity_path: identity_path.clone(),
+            keepalive_secs: 60,
+            ki_submethods: None,
+        };
+
+        let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
+        let (mfa_tx, mut mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(16);
+        tokio::spawn(async move {
+            while let Ok(Some(item)) = inbound.message().await {
+                if let Some(proto::resolve_home_dir_request::Msg::Mfa(ans)) = item.msg
+                    && mfa_tx.send(ans).await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let target = match &addr {
+            Address::Hostname(host) => format!("{username}@{host}"),
+            Address::Ip(host) => format!("{username}@{host}"),
+        };
+        let sessions = self.sessions();
+        let session_name = name.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        tokio::spawn(async move {
+            let sm = Arc::new(crate::ssh::SessionManager::new(ssh_params));
+            if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
+                let _ = evt_tx
+                    .send(Err(Status::aborted(format!(
+                        "failed to connect to {target}: {e}",
+                    ))))
+                    .await;
+                return;
+            };
+
+            let home = match fetch_remote_home_dir(&sm, &target).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = evt_tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            if let Some(name) = session_name {
+                sessions.insert(name, sm.clone()).await;
+            }
+            let _ = evt_tx
+                .send(Ok(StreamEvent {
+                    event: Some(stream_event::Event::Stdout(home.into_bytes())),
+                }))
+                .await;
+            let _ = evt_tx
+                .send(Ok(StreamEvent {
+                    event: Some(stream_event::Event::ExitCode(0)),
+                }))
+                .await;
+        });
+
+        let out: OutStream = Box::pin(crate::ssh::receiver_to_stream(evt_rx));
+        Ok(tonic::Response::new(out))
     }
 
     async fn ls(
@@ -735,7 +941,10 @@ impl Agent for AgentSvc {
         let hs = self.hosts();
         let sessions = self.sessions();
         tokio::spawn(async move {
-            let sm = crate::ssh::SessionManager::new(ssh_params);
+            let sm = match sessions.get(&name).await {
+                Some(existing) if existing.matches_params(&ssh_params) => existing,
+                _ => Arc::new(crate::ssh::SessionManager::new(ssh_params)),
+            };
             if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
                 let _ = evt_tx
                     .send(Err(Status::aborted(format!(
@@ -949,14 +1158,22 @@ impl Agent for AgentSvc {
                 false
             });
 
-            let normalized_default_base_path = match normalize_default_base_path(default_base_path)
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = evt_tx.send(Err(e)).await;
-                    return;
-                }
-            };
+            let resolved_default_base_path =
+                match resolve_default_base_path(&sm, &name, default_base_path).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = evt_tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+            let normalized_default_base_path =
+                match normalize_default_base_path(resolved_default_base_path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = evt_tx.send(Err(e)).await;
+                        return;
+                    }
+                };
             if let Some(ref dbp) = normalized_default_base_path {
                 let command = format!("mkdir -p {}", dbp.to_string_lossy());
                 let (_, err, code) = match sm.exec_capture(&command).await {
@@ -1010,7 +1227,7 @@ impl Agent for AgentSvc {
                 }
             };
 
-            sessions.insert(name.clone(), Arc::new(sm)).await;
+            sessions.insert(name.clone(), sm.clone()).await;
         });
         let out: OutStream = Box::pin(crate::ssh::receiver_to_stream(evt_rx));
         Ok(tonic::Response::new(out))

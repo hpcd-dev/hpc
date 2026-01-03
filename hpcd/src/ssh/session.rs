@@ -107,6 +107,10 @@ impl SessionManager {
         }
     }
 
+    pub fn matches_params(&self, params: &SshParams) -> bool {
+        self.params == *params
+    }
+
     pub async fn shutdown(&self) {
         if let Some(task) = self.keepalive_task_handle.lock().await.take() {
             task.abort();

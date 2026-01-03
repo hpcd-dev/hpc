@@ -6,7 +6,7 @@ use clap::{CommandFactory, FromArgMatches};
 use cli::args::{Cli, ClusterCmd, Cmd, JobCmd, SubmitArgs};
 use cli::client::{
     fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_delete_cluster, send_job_retrieve,
-    send_ls, send_ping, send_submit,
+    send_ls, send_ping, send_resolve_home_dir, send_submit,
 };
 use cli::filters::submit_filters_from_matches;
 use cli::format::{
@@ -14,7 +14,7 @@ use cli::format::{
     format_clusters_table, format_job_details, format_job_details_json, format_jobs_json,
     format_jobs_table,
 };
-use cli::interactive::{confirm_action, resolve_add_cluster_args};
+use cli::interactive::{confirm_action, prompt_default_base_path, resolve_add_cluster_args};
 use cli::sbatch::resolve_sbatch_script;
 use proto::ListJobsUnitResponse;
 use proto::agent_client::AgentClient;
@@ -174,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 ClusterCmd::Add(args) => {
                     println!("Adding new cluster...");
-                    let resolved = resolve_add_cluster_args(args)?;
+                    let mut resolved = resolve_add_cluster_args(args)?;
                     let response = fetch_list_clusters(&mut client, "").await?;
                     if response
                         .clusters
@@ -200,6 +200,20 @@ async fn main() -> anyhow::Result<()> {
                                 resolved.port
                             );
                         }
+                    }
+                    if resolved.default_base_path.is_none() {
+                        let home_dir = send_resolve_home_dir(
+                            &mut client,
+                            &resolved.name,
+                            &resolved.username,
+                            &resolved.hostname,
+                            &resolved.ip,
+                            Some(resolved.identity_path.as_str()),
+                            resolved.port,
+                        )
+                        .await?;
+                        let base_path = prompt_default_base_path(&home_dir)?;
+                        resolved.default_base_path = Some(base_path);
                     }
                     send_add_cluster(
                         &mut client,

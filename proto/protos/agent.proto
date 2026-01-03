@@ -129,6 +129,24 @@ message AddClusterInit {
   uint32 port = 6;
   optional string default_base_path = 7;
 }
+
+message ResolveHomeDirRequestInit {
+  string username = 1;
+  oneof host {
+    string hostname = 2;
+    string ipaddr = 3;
+  }
+  optional string identity_path = 4;
+  uint32 port = 5;
+  optional string name = 6;
+}
+
+message ResolveHomeDirRequest {
+  oneof msg {
+    ResolveHomeDirRequestInit init = 1;
+    MfaAnswer mfa = 2;
+  }
+}
 message ListClustersRequest {
   string filter = 1;
 }
@@ -208,6 +226,7 @@ service Agent {
   rpc RetrieveJob(stream RetrieveJobRequest) returns (stream StreamEvent);
   rpc Submit(stream SubmitRequest) returns (stream SubmitStreamEvent);
   rpc AddCluster(stream AddClusterRequest) returns (stream StreamEvent);
+  rpc ResolveHomeDir(stream ResolveHomeDirRequest) returns (stream StreamEvent);
   rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
   rpc DeleteCluster(DeleteClusterRequest) returns (DeleteClusterResponse);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);

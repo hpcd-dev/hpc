@@ -14,6 +14,7 @@ use std::net::IpAddr;
 
 const DEFAULT_SSH_PORT: u32 = 22;
 const DEFAULT_IDENTITY_PATH: &str = "~/.ssh/id_ed25519";
+const DEFAULT_BASE_PATH: &str = "~";
 const HINT_COLOR: Color = Color::DarkGrey;
 
 #[derive(Debug)]
@@ -25,6 +26,15 @@ pub struct ResolvedAddClusterArgs {
     pub port: u32,
     pub identity_path: String,
     pub default_base_path: Option<String>,
+}
+
+pub fn prompt_default_base_path(default_value: &str) -> anyhow::Result<String> {
+    ensure_tty_for_prompt()?;
+    prompt_with_default(
+        "Default base path",
+        default_value,
+        "Remote base folder for projects.",
+    )
 }
 
 pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<ResolvedAddClusterArgs> {
@@ -156,12 +166,9 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
         Some(value) => Some(value),
         None => {
             if args.headless {
-                None
+                Some(DEFAULT_BASE_PATH.to_string())
             } else {
-                prompt_optional(
-                    "Default base path",
-                    "Remote base folder for projects (optional).",
-                )?
+                None
             }
         }
     };
@@ -350,17 +357,6 @@ fn prompt_with_default(label: &str, default: &str, hint: &str) -> anyhow::Result
         Ok(default.to_string())
     } else {
         Ok(trimmed.to_string())
-    }
-}
-
-fn prompt_optional(label: &str, hint: &str) -> anyhow::Result<Option<String>> {
-    let hint = format_default_hint("none", hint);
-    let result = prompt_line_with_default_result(&format!("{label}: "), &hint, Some("none"))?;
-    let trimmed = result.input.trim();
-    if trimmed.is_empty() || result.used_default {
-        Ok(None)
-    } else {
-        Ok(Some(trimmed.to_string()))
     }
 }
 
@@ -635,7 +631,7 @@ mod tests {
         let resolved = resolve_add_cluster_args(args).unwrap();
         assert_eq!(resolved.port, DEFAULT_SSH_PORT);
         assert_eq!(resolved.identity_path, DEFAULT_IDENTITY_PATH);
-        assert!(resolved.default_base_path.is_none());
+        assert_eq!(resolved.default_base_path.as_deref(), Some(DEFAULT_BASE_PATH));
         assert_eq!(resolved.username, "alex");
         assert_eq!(resolved.name, "example.com");
     }
