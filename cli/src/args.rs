@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(name = "hpc", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -14,10 +14,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Check that the daemon is reachable.
     Ping,
+    /// List files on a cluster.
     Ls(LsArgs),
+    /// Submit a project to a cluster.
     Submit(SubmitArgs),
+    /// Inspect jobs and retrieve outputs.
     Job(JobArgs),
+    /// Add clusters and manage their configuration.
     Cluster(ClusterArgs),
 }
 

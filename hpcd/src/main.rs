@@ -16,6 +16,7 @@ mod util;
 
 #[derive(Parser)]
 #[command(
+    name = "hpcd",
     version,
     about,
     long_about = None,
