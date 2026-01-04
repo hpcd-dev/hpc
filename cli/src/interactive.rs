@@ -9,9 +9,14 @@ use crossterm::execute;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{self, ClearType};
 use rand::prelude::IndexedRandom;
-use std::io::{IsTerminal, Write};
+use ratatui::symbols::braille;
+use std::collections::HashSet;
+use std::io::{IsTerminal, Read, Write};
+use std::fs;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const DEFAULT_SSH_PORT: u32 = 22;
 const DEFAULT_IDENTITY_PATH: &str = "~/.ssh/id_ed25519";
@@ -43,7 +48,10 @@ pub fn prompt_default_base_path(home_dir: &str) -> anyhow::Result<String> {
     )
 }
 
-pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<ResolvedAddClusterArgs> {
+pub fn resolve_add_cluster_args(
+    args: AddClusterArgs,
+    existing_names: &HashSet<String>,
+) -> anyhow::Result<ResolvedAddClusterArgs> {
     let destination = normalize_option(args.destination);
     let name = normalize_option(args.name);
     let identity_path = normalize_option(args.identity_path);
@@ -58,24 +66,33 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
         ensure_tty_for_prompt()?;
     }
 
-    let mut destination_prompted = false;
     let parsed_destination = if let Some(value) = destination.as_deref() {
         let parsed = parse_destination(value)?;
-        validate_destination_reachability(&parsed)?;
+        let display = format_destination_display(&parsed)?;
+        validate_destination_with_feedback(&parsed, &display, false, args.headless)?;
         parsed
     } else {
         if args.headless {
             bail!("destination is required in headless mode");
         }
-        destination_prompted = true;
-        prompt_destination()?
-    };
-
-    if !destination_prompted {
-        if let Some(value) = destination.as_deref() {
-            print_selected_value("Destination", value);
+        loop {
+            let input = prompt_destination_value()?;
+            let parsed = match parse_destination(&input) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    eprintln!("Please, provide a valid connection string");
+                    continue;
+                }
+            };
+            let display = format_destination_display(&parsed)?;
+            if let Err(_) = validate_destination_with_feedback(&parsed, &display, true, args.headless)
+            {
+                eprintln!("Please, provide a valid connection string");
+                continue;
+            }
+            break parsed;
         }
-    }
+    };
 
     let (hostname, ip) = if parsed_destination.host.parse::<IpAddr>().is_ok() {
         (None, Some(parsed_destination.host.clone()))
@@ -88,15 +105,15 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
         None => bail!("destination username is required"),
     };
 
-    let mut name_prompted = false;
-    let name = match name {
+    let mut name_from_prompt = false;
+    let mut name = match name {
         Some(value) => value,
         None => {
             if args.headless {
                 default_name_for_host(hostname.as_deref(), ip.as_deref())?
             } else {
                 let default_name = generate_random_name();
-                name_prompted = true;
+                name_from_prompt = true;
                 prompt_with_default(
                     "Name",
                     &default_name,
@@ -105,20 +122,42 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
             }
         }
     };
-    if !name_prompted {
-        print_selected_value("Name", &name);
+    loop {
+        let replace_prompt_line = name_from_prompt && !args.headless;
+        match validate_name_with_feedback(
+            &name,
+            existing_names,
+            replace_prompt_line,
+            args.headless,
+        ) {
+            Ok(()) => break,
+            Err(err) => {
+                if args.headless {
+                    return Err(err);
+                }
+                ensure_tty_for_prompt()?;
+                eprintln!("Name '{name}' is already taken. Please choose another name.");
+                name_from_prompt = true;
+                let default_name = generate_random_name();
+                name = prompt_with_default(
+                    "Name",
+                    &default_name,
+                    "Friendly name used in other commands (e.g. gpu01).",
+                )?;
+            }
+        }
     }
 
     let port = parsed_destination.port.unwrap_or(DEFAULT_SSH_PORT);
 
-    let mut identity_prompted = false;
-    let identity_path = match identity_path {
+    let mut identity_from_prompt = false;
+    let mut identity_path = match identity_path {
         Some(value) => value,
         None => {
             if args.headless {
                 DEFAULT_IDENTITY_PATH.to_string()
             } else {
-                identity_prompted = true;
+                identity_from_prompt = true;
                 prompt_with_default(
                     "Identity path",
                     DEFAULT_IDENTITY_PATH,
@@ -127,8 +166,29 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
             }
         }
     };
-    if !identity_prompted {
-        print_selected_value("Identity path", &identity_path);
+    loop {
+        let replace_prompt_line = identity_from_prompt && !args.headless;
+        match validate_identity_path_with_feedback(
+            &identity_path,
+            replace_prompt_line,
+            args.headless,
+        ) {
+            Ok(()) => break,
+            Err(err) => {
+                if args.headless {
+                    return Err(err);
+                }
+                ensure_tty_for_prompt()?;
+                eprintln!("Identity path '{identity_path}' is invalid: {err}");
+                identity_from_prompt = true;
+                let fallback = identity_path.clone();
+                identity_path = prompt_with_default(
+                    "Identity path",
+                    &fallback,
+                    "SSH private key path used for authentication.",
+                )?;
+            }
+        }
     }
 
     let default_base_path = match default_base_path {
@@ -141,9 +201,6 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
             }
         }
     };
-    if let Some(ref value) = default_base_path {
-        print_selected_value("Default base path", value);
-    }
 
     Ok(ResolvedAddClusterArgs {
         hostname,
@@ -163,8 +220,358 @@ struct ParsedDestination {
     port: Option<u32>,
 }
 
-fn print_selected_value(label: &str, value: &str) {
-    println!("{label}: {value}");
+struct ValidationSpinner {
+    stop_tx: mpsc::Sender<()>,
+    handle: thread::JoinHandle<()>,
+    started_at: Instant,
+    min_duration: Duration,
+}
+
+impl ValidationSpinner {
+    fn start(message: &str, min_duration: Duration) -> Self {
+        let message = message.to_string();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let frames = braille_spinner_frames();
+            let mut i = 0usize;
+            loop {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+                eprint!("\r{} {}", message, frames[i % frames.len()]);
+                let _ = std::io::stderr().flush();
+                i += 1;
+                thread::sleep(Duration::from_millis(120));
+            }
+            let clear = " ".repeat(message.chars().count() + 2);
+            eprint!("\r{clear}\r");
+            let _ = std::io::stderr().flush();
+        });
+        Self {
+            stop_tx,
+            handle,
+            started_at: Instant::now(),
+            min_duration,
+        }
+    }
+
+    fn stop(self) {
+        let elapsed = self.started_at.elapsed();
+        if elapsed < self.min_duration {
+            thread::sleep(self.min_duration - elapsed);
+        }
+        let _ = self.stop_tx.send(());
+        let _ = self.handle.join();
+    }
+}
+
+fn braille_spinner_frames() -> [char; 6] {
+    let all_mask = braille::DOTS
+        .iter()
+        .take(3)
+        .flatten()
+        .fold(0u16, |acc, mask| acc | mask);
+    let order = [(0usize, 0usize), (0, 1), (1, 1), (2, 1), (2, 0), (1, 0)];
+    let mut frames = [' '; 6];
+    for (idx, (row, col)) in order.iter().enumerate() {
+        let mask = braille::DOTS[*row][*col];
+        let codepoint = u32::from(braille::BLANK | (all_mask & !mask));
+        frames[idx] = char::from_u32(codepoint).unwrap_or(' ');
+    }
+    frames
+}
+
+fn format_destination_display(destination: &ParsedDestination) -> anyhow::Result<String> {
+    let username = destination
+        .username
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("destination username is required"))?;
+    let host = if destination.host.contains(':')
+        && !(destination.host.starts_with('[') && destination.host.ends_with(']'))
+    {
+        format!("[{}]", destination.host)
+    } else {
+        destination.host.clone()
+    };
+    let port = destination.port.unwrap_or(DEFAULT_SSH_PORT);
+    Ok(format!("{username}@{host}:{port}"))
+}
+
+fn validate_destination_with_feedback(
+    destination: &ParsedDestination,
+    display: &str,
+    replace_prompt_line: bool,
+    headless: bool,
+) -> anyhow::Result<()> {
+    if headless {
+        return validate_destination_reachability(destination);
+    }
+
+    let use_tty = std::io::stderr().is_terminal();
+    if use_tty && replace_prompt_line {
+        replace_prompt_line_for_validation()?;
+    }
+
+    if use_tty {
+        let spinner = ValidationSpinner::start(
+            &format!("Validating {display}"),
+            Duration::from_millis(500),
+        );
+        let result = validate_destination_reachability(destination);
+        spinner.stop();
+        match result {
+            Ok(()) => print_destination_validated(display, true),
+            Err(err) => Err(err),
+        }
+    } else {
+        eprintln!("Validating {display}");
+        let result = validate_destination_reachability(destination);
+        match result {
+            Ok(()) => print_destination_validated(display, false),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+fn validate_name_with_feedback(
+    name: &str,
+    existing_names: &HashSet<String>,
+    replace_prompt_line: bool,
+    headless: bool,
+) -> anyhow::Result<()> {
+    if headless {
+        if existing_names.contains(name) {
+            bail!("cluster '{}' already exists; use 'cluster set' to update it", name);
+        }
+        return Ok(());
+    }
+
+    let use_tty = std::io::stderr().is_terminal();
+    if use_tty && replace_prompt_line {
+        replace_prompt_line_for_validation()?;
+    }
+
+    if use_tty {
+        let spinner =
+            ValidationSpinner::start(&format!("Validating {name}"), Duration::from_millis(500));
+        let taken = existing_names.contains(name);
+        spinner.stop();
+        if taken {
+            bail!("cluster '{}' already exists; use 'cluster set' to update it", name);
+        }
+        print_name_validated(name, true)
+    } else {
+        eprintln!("Validating {name}");
+        if existing_names.contains(name) {
+            bail!("cluster '{}' already exists; use 'cluster set' to update it", name);
+        }
+        print_name_validated(name, false)
+    }
+}
+
+fn validate_identity_path_with_feedback(
+    identity_path: &str,
+    replace_prompt_line: bool,
+    headless: bool,
+) -> anyhow::Result<()> {
+    if headless {
+        return validate_identity_path(identity_path);
+    }
+
+    let use_tty = std::io::stderr().is_terminal();
+    if use_tty && replace_prompt_line {
+        replace_prompt_line_for_validation()?;
+    }
+
+    if use_tty {
+        let spinner = ValidationSpinner::start(
+            &format!("Validating {identity_path}"),
+            Duration::from_millis(500),
+        );
+        let result = validate_identity_path(identity_path);
+        spinner.stop();
+        match result {
+            Ok(()) => print_identity_path_validated(identity_path, true),
+            Err(err) => Err(err),
+        }
+    } else {
+        eprintln!("Validating {identity_path}");
+        let result = validate_identity_path(identity_path);
+        match result {
+            Ok(()) => print_identity_path_validated(identity_path, false),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+pub fn validate_default_base_path_with_feedback(
+    base_path: &str,
+    replace_prompt_line: bool,
+    headless: bool,
+) -> anyhow::Result<()> {
+    if headless {
+        return validate_default_base_path(base_path);
+    }
+
+    let use_tty = std::io::stderr().is_terminal();
+    if use_tty && replace_prompt_line {
+        replace_prompt_line_for_validation()?;
+    }
+
+    if use_tty {
+        let spinner = ValidationSpinner::start(
+            &format!("Validating {base_path}"),
+            Duration::from_millis(500),
+        );
+        let result = validate_default_base_path(base_path);
+        spinner.stop();
+        match result {
+            Ok(()) => print_default_base_path_validated(base_path, true),
+            Err(err) => Err(err),
+        }
+    } else {
+        eprintln!("Validating {base_path}");
+        let result = validate_default_base_path(base_path);
+        match result {
+            Ok(()) => print_default_base_path_validated(base_path, false),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+fn validate_default_base_path(base_path: &str) -> anyhow::Result<()> {
+    let trimmed = base_path.trim();
+    if trimmed.is_empty() {
+        bail!("default base path cannot be empty");
+    }
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        return Ok(());
+    }
+    if trimmed.starts_with('~') {
+        bail!("default base path must be absolute or start with '~/' (use '~')");
+    }
+    if trimmed.starts_with('/') {
+        return Ok(());
+    }
+    bail!("default base path must be absolute or start with '~/' (use '~')");
+}
+
+fn validate_identity_path(identity_path: &str) -> anyhow::Result<()> {
+    let expanded = shellexpand::full(identity_path)?.to_string();
+    let metadata = fs::metadata(&expanded)
+        .map_err(|_| anyhow::anyhow!("identity path does not exist"))?;
+    if !metadata.is_file() {
+        bail!("identity path is not a file");
+    }
+    let mut file = fs::File::open(&expanded)
+        .map_err(|_| anyhow::anyhow!("identity path is not readable"))?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .map_err(|_| anyhow::anyhow!("identity path is not readable"))?;
+    if contents.is_empty() {
+        bail!("identity path is empty");
+    }
+    if !looks_like_identity_file(&contents) {
+        bail!("identity path does not look like a private key");
+    }
+    Ok(())
+}
+
+fn looks_like_identity_file(contents: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(contents);
+    const KEY_MARKERS: [&str; 7] = [
+        "BEGIN OPENSSH PRIVATE KEY",
+        "BEGIN RSA PRIVATE KEY",
+        "BEGIN EC PRIVATE KEY",
+        "BEGIN DSA PRIVATE KEY",
+        "BEGIN ED25519 PRIVATE KEY",
+        "BEGIN PRIVATE KEY",
+        "BEGIN ENCRYPTED PRIVATE KEY",
+    ];
+    KEY_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+fn replace_prompt_line_for_validation() -> anyhow::Result<()> {
+    let mut stderr = std::io::stderr();
+    execute!(
+        stderr,
+        cursor::MoveUp(1),
+        cursor::MoveToColumn(0),
+        terminal::Clear(ClearType::CurrentLine)
+    )?;
+    Ok(())
+}
+
+fn print_destination_validated(destination: &str, use_color: bool) -> anyhow::Result<()> {
+    let mut stderr = std::io::stderr();
+    if use_color {
+        execute!(
+            stderr,
+            SetForegroundColor(Color::Green),
+            Print("✓"),
+            ResetColor,
+            Print(" Destination: "),
+            Print(destination),
+            Print("\r\n")
+        )?;
+    } else {
+        eprintln!("✓ Destination: {destination}");
+    }
+    Ok(())
+}
+
+fn print_name_validated(name: &str, use_color: bool) -> anyhow::Result<()> {
+    let mut stderr = std::io::stderr();
+    if use_color {
+        execute!(
+            stderr,
+            SetForegroundColor(Color::Green),
+            Print("✓"),
+            ResetColor,
+            Print(" Name: "),
+            Print(name),
+            Print("\r\n")
+        )?;
+    } else {
+        eprintln!("✓ Name: {name}");
+    }
+    Ok(())
+}
+
+fn print_identity_path_validated(identity_path: &str, use_color: bool) -> anyhow::Result<()> {
+    let mut stderr = std::io::stderr();
+    if use_color {
+        execute!(
+            stderr,
+            SetForegroundColor(Color::Green),
+            Print("✓"),
+            ResetColor,
+            Print(" Identity path: "),
+            Print(identity_path),
+            Print("\r\n")
+        )?;
+    } else {
+        eprintln!("✓ Identity path: {identity_path}");
+    }
+    Ok(())
+}
+
+fn print_default_base_path_validated(base_path: &str, use_color: bool) -> anyhow::Result<()> {
+    let mut stderr = std::io::stderr();
+    if use_color {
+        execute!(
+            stderr,
+            SetForegroundColor(Color::Green),
+            Print("✓"),
+            ResetColor,
+            Print(" Default base path: "),
+            Print(base_path),
+            Print("\r\n")
+        )?;
+    } else {
+        eprintln!("✓ Default base path: {base_path}");
+    }
+    Ok(())
 }
 
 fn normalize_option(value: Option<String>) -> Option<String> {
@@ -200,25 +607,15 @@ pub fn confirm_action(prompt: &str, hint: &str) -> anyhow::Result<bool> {
     }
 }
 
-fn prompt_destination() -> anyhow::Result<ParsedDestination> {
+fn prompt_destination_value() -> anyhow::Result<String> {
     loop {
-        let input = prompt_line(
-            "Destination: ",
-            "SSH destination in user@host[:port] form.",
-        )?;
+        let input = prompt_line("Destination: ", "SSH destination in user@host[:port] form.")?;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             eprintln!("Please, provide a valid connection string");
             continue;
         }
-        match parse_destination(trimmed)
-            .and_then(|parsed| {
-                validate_destination_reachability(&parsed)?;
-                Ok(parsed)
-            }) {
-            Ok(parsed) => return Ok(parsed),
-            Err(_) => eprintln!("Please, provide a valid connection string"),
-        }
+        return Ok(trimmed.to_string());
     }
 }
 
@@ -595,7 +992,33 @@ const SCIENTISTS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::io::Write;
     use std::net::TcpListener;
+
+    fn write_test_identity_file() -> std::io::Result<String> {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let content = b"-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----\n";
+        for idx in 0..1000 {
+            let path = dir.join(format!("hpc_test_identity_{pid}_{idx}.key"));
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path);
+            let mut file = match file {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            };
+            file.write_all(content)?;
+            return Ok(path.to_string_lossy().into_owned());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "failed to create temp identity file",
+        ))
+    }
 
     #[test]
     fn resolve_add_cluster_headless_defaults() {
@@ -607,17 +1030,24 @@ mod tests {
             Err(err) => panic!("failed to bind listener: {err}"),
         };
         let port = listener.local_addr().unwrap().port();
+        let identity_path = match write_test_identity_file() {
+            Ok(path) => path,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                return;
+            }
+            Err(err) => panic!("failed to create identity file: {err}"),
+        };
         let args = AddClusterArgs {
             destination: Some(format!("alex@localhost:{port}")),
             name: None,
-            identity_path: None,
+            identity_path: Some(identity_path.clone()),
             default_base_path: None,
             headless: true,
         };
 
-        let resolved = resolve_add_cluster_args(args).unwrap();
+        let resolved = resolve_add_cluster_args(args, &HashSet::new()).unwrap();
         assert_eq!(resolved.port, port as u32);
-        assert_eq!(resolved.identity_path, DEFAULT_IDENTITY_PATH);
+        assert_eq!(resolved.identity_path, identity_path);
         assert_eq!(resolved.default_base_path.as_deref(), Some(DEFAULT_BASE_PATH));
         assert_eq!(resolved.username, "alex");
         assert_eq!(resolved.name, "localhost");
@@ -633,7 +1063,7 @@ mod tests {
             headless: true,
         };
 
-        let err = resolve_add_cluster_args(args).unwrap_err();
+        let err = resolve_add_cluster_args(args, &HashSet::new()).unwrap_err();
         assert!(err.to_string().contains("destination"));
     }
 
@@ -663,15 +1093,22 @@ mod tests {
             Err(err) => panic!("failed to bind listener: {err}"),
         };
         let port = listener.local_addr().unwrap().port();
+        let identity_path = match write_test_identity_file() {
+            Ok(path) => path,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                return;
+            }
+            Err(err) => panic!("failed to create identity file: {err}"),
+        };
         let args = AddClusterArgs {
             destination: Some(format!("alex@127.0.0.1:{port}")),
             name: Some("local".into()),
-            identity_path: None,
+            identity_path: Some(identity_path),
             default_base_path: None,
             headless: true,
         };
 
-        let resolved = resolve_add_cluster_args(args).unwrap();
+        let resolved = resolve_add_cluster_args(args, &HashSet::new()).unwrap();
         assert_eq!(resolved.username, "alex");
         assert_eq!(resolved.port, port as u32);
         assert_eq!(resolved.name, "local");

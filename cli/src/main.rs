@@ -14,7 +14,10 @@ use cli::format::{
     format_clusters_table, format_job_details, format_job_details_json, format_jobs_json,
     format_jobs_table,
 };
-use cli::interactive::{confirm_action, prompt_default_base_path, resolve_add_cluster_args};
+use cli::interactive::{
+    confirm_action, prompt_default_base_path, resolve_add_cluster_args,
+    validate_default_base_path_with_feedback,
+};
 use cli::sbatch::resolve_sbatch_script;
 use cli::stream::MinDurationSpinner;
 use proto::ListJobsUnitResponse;
@@ -184,18 +187,14 @@ async fn main() -> anyhow::Result<()> {
                 }
                 ClusterCmd::Add(args) => {
                     println!("Adding new cluster...");
-                    let mut resolved = resolve_add_cluster_args(args)?;
+                    let headless = args.headless;
                     let response = fetch_list_clusters(&mut client, "").await?;
-                    if response
+                    let existing_names = response
                         .clusters
                         .iter()
-                        .any(|cluster| cluster.name == resolved.name)
-                    {
-                        bail!(
-                            "cluster '{}' already exists; use 'cluster set' to update it",
-                            resolved.name
-                        );
-                    }
+                        .map(|cluster| cluster.name.clone())
+                        .collect::<std::collections::HashSet<_>>();
+                    let mut resolved = resolve_add_cluster_args(args, &existing_names)?;
                     if let Some(host) = resolved.hostname.as_deref().or(resolved.ip.as_deref()) {
                         if let Some(existing) = response.clusters.iter().find(|cluster| {
                             cluster.username == resolved.username
@@ -211,7 +210,19 @@ async fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
-                    if resolved.default_base_path.is_none() {
+                    let mut needs_base_path_prompt = resolved.default_base_path.is_none();
+                    if let Some(ref value) = resolved.default_base_path {
+                        if let Err(err) =
+                            validate_default_base_path_with_feedback(value, false, headless)
+                        {
+                            if headless {
+                                return Err(err);
+                            }
+                            eprintln!("Default base path '{value}' is invalid: {err}");
+                            needs_base_path_prompt = true;
+                        }
+                    }
+                    if needs_base_path_prompt {
                         let home_dir = send_resolve_home_dir(
                             &mut client,
                             &resolved.name,
@@ -222,8 +233,25 @@ async fn main() -> anyhow::Result<()> {
                             resolved.port,
                         )
                         .await?;
-                        let base_path = prompt_default_base_path(&home_dir)?;
-                        resolved.default_base_path = Some(base_path);
+                        loop {
+                            let base_path = prompt_default_base_path(&home_dir)?;
+                            match validate_default_base_path_with_feedback(
+                                &base_path,
+                                true,
+                                headless,
+                            ) {
+                                Ok(()) => {
+                                    resolved.default_base_path = Some(base_path);
+                                    break;
+                                }
+                                Err(err) => {
+                                    if headless {
+                                        return Err(err);
+                                    }
+                                    eprintln!("Default base path '{base_path}' is invalid: {err}");
+                                }
+                            }
+                        }
                     }
                     let info_spinner = MinDurationSpinner::start(
                         "Gathering cluster information",
