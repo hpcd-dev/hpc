@@ -83,8 +83,8 @@ pub struct Distro {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct NewHost {
-    /// Short, memorable, globally-unique id (e.g., "gpu01", "c1", "node-a")
-    pub hostid: String,
+    /// Short, memorable, globally-unique name (e.g., "gpu01", "c1", "node-a")
+    pub name: String,
     /// Username for server
     pub username: String,
     /// hostname or IP address
@@ -111,7 +111,7 @@ pub struct NewHost {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct HostRecord {
     pub id: i64,
-    pub hostid: String,
+    pub name: String,
     pub username: String,
     pub address: Address,
     pub port: u16,
@@ -131,8 +131,8 @@ pub enum HostStoreError {
     Sqlx(#[from] sqlx::Error),
     #[error("invalid address (both hostname and ip are missing)")]
     InvalidAddress,
-    #[error("empty hostid")]
-    EmptyHostId,
+    #[error("empty name")]
+    EmptyName,
     #[error("host not found: {0}")]
     HostNotFound(String),
 }
@@ -163,9 +163,9 @@ pub type Result<T> = std::result::Result<T, HostStoreError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct NewJob {
-    /// Slurm job ID; host-specific. Database will additionally keep its own, internal id.
-    pub slurm_id: Option<i64>,
-    /// Host ID on which the job is submitted.
+    /// Scheduler job ID; host-specific. Database will additionally keep its own, internal id.
+    pub scheduler_id: Option<i64>,
+    /// Host row id on which the job is submitted.
     pub host_id: i64,
     pub local_path: String,
     pub remote_path: String,
@@ -175,8 +175,8 @@ pub struct NewJob {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct JobRecord {
     pub id: i64,
-    pub slurm_id: Option<i64>,
-    pub host_id: String,
+    pub scheduler_id: Option<i64>,
+    pub name: String,
     pub created_at: String,
     pub finished_at: Option<String>,
     pub is_completed: bool,
@@ -230,12 +230,12 @@ impl HostStore {
             .execute(&self.pool)
             .await;
 
-        // Initial create (new DBs get hostid from the start).
+        // Initial create (new DBs get name from the start).
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS hosts (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
-              hostid TEXT,                       -- unique short id; made UNIQUE/indexed below
+              name TEXT,                       -- unique short id; made UNIQUE/indexed below
               username TEXT NOT NULL,
               hostname TEXT,
               ip TEXT,
@@ -258,15 +258,16 @@ impl HostStore {
         .execute(&self.pool)
         .await?;
 
-        // If we're upgrading an existing table, make sure `hostid` exists and is indexed.
-        self.ensure_hostid_column_and_index().await?;
+        // If we're upgrading an existing table, make sure `name` exists and is indexed.
+        self.ensure_name_column_and_index().await?;
 
         self.ensure_partitions_table().await?;
         // Other helpful indexes
         sqlx::query(
             r#"
+            DROP INDEX IF EXISTS idx_hosts_user_addr;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_user_addr
-              ON hosts(username, COALESCE(hostname, ip));
+              ON hosts(username, COALESCE(hostname, ip), port);
             CREATE INDEX IF NOT EXISTS idx_hosts_hostname ON hosts(hostname);
             CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts(ip);
             CREATE INDEX IF NOT EXISTS idx_hosts_username ON hosts(username);
@@ -298,46 +299,80 @@ impl HostStore {
         .await?;
         Ok(())
     }
-    /// Adds `hostid` if missing, backfills for NULL rows, then enforces uniqueness.
-    async fn ensure_hostid_column_and_index(&self) -> Result<()> {
-        // Does the column exist?
-        let col_exists = sqlx::query("PRAGMA table_info('hosts');")
+    /// Adds `name` if missing, backfills for NULL rows, then enforces uniqueness.
+    async fn ensure_name_column_and_index(&self) -> Result<()> {
+        let columns = sqlx::query("PRAGMA table_info('hosts');")
             .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .any(|r| {
-                r.try_get::<String, _>("name")
-                    .map(|n| n == "hostid")
-                    .unwrap_or(false)
-            });
+            .await?;
+        let mut has_name = columns.iter().any(|r| {
+            r.try_get::<String, _>("name")
+                .map(|n| n == "name")
+                .unwrap_or(false)
+        });
+        let mut has_hostid = columns.iter().any(|r| {
+            r.try_get::<String, _>("name")
+                .map(|n| n == "hostid")
+                .unwrap_or(false)
+        });
 
-        if !col_exists {
-            // Add the column (nullable for existing rows).
-            sqlx::query(r#"ALTER TABLE hosts ADD COLUMN hostid TEXT"#)
-                .execute(&self.pool)
-                .await?;
+        if !has_name {
+            if has_hostid {
+                let renamed = sqlx::query("ALTER TABLE hosts RENAME COLUMN hostid TO name")
+                    .execute(&self.pool)
+                    .await
+                    .is_ok();
+                if renamed {
+                    has_name = true;
+                    has_hostid = false;
+                } else {
+                    sqlx::query(r#"ALTER TABLE hosts ADD COLUMN name TEXT"#)
+                        .execute(&self.pool)
+                        .await?;
+                    has_name = true;
+                }
+            } else {
+                // Add the column (nullable for existing rows).
+                sqlx::query(r#"ALTER TABLE hosts ADD COLUMN name TEXT"#)
+                    .execute(&self.pool)
+                    .await?;
+                has_name = true;
+            }
         }
 
-        // Backfill any NULL hostid with a random short token (16 hex chars).
-        // Users can later set their own memorable hostid via update.
-        sqlx::query(
-            r#"
-            UPDATE hosts
-               SET hostid = lower(hex(randomblob(8)))
-             WHERE hostid IS NULL
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        if has_name && has_hostid {
+            sqlx::query(
+                r#"
+                UPDATE hosts
+                   SET name = hostid
+                 WHERE name IS NULL OR name = ''
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+        }
 
-        // Enforce uniqueness & speed lookups.
-        sqlx::query(
-            r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_hostid ON hosts(hostid);
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        // Backfill any NULL/empty name with a random short token (16 hex chars).
+        // Users can later set their own memorable name via update.
+        if has_name {
+            sqlx::query(
+                r#"
+                UPDATE hosts
+                   SET name = lower(hex(randomblob(8)))
+                 WHERE name IS NULL OR name = ''
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+
+            // Enforce uniqueness & speed lookups.
+            sqlx::query(
+                r#"
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_name ON hosts(name);
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+        }
 
         Ok(())
     }
@@ -346,7 +381,7 @@ impl HostStore {
             r#"
             create table if not exists jobs (
             id integer primary key autoincrement,
-            slurm_id integer,
+            scheduler_id integer,
             host_id integer not null references hosts(id) on delete cascade,
             local_path TEXT NOT NULL,
             remote_path TEXT NOT NULL,
@@ -376,7 +411,7 @@ impl HostStore {
             .execute(&self.pool)
             .await?;
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_slurm_id_host_id ON jobs(slurm_id,host_id)",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_scheduler_id_host_id ON jobs(scheduler_id,host_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -384,8 +419,8 @@ impl HostStore {
     }
     /// Insert a new host. Returns the new row id.
     pub async fn insert_host(&self, host: &NewHost) -> Result<i64> {
-        if host.hostid.trim().is_empty() {
-            return Err(HostStoreError::EmptyHostId);
+        if host.name.trim().is_empty() {
+            return Err(HostStoreError::EmptyName);
         }
 
         let (hostname, ip) = match &host.address {
@@ -399,7 +434,7 @@ impl HostStore {
         let rec = sqlx::query(
             r#"
             INSERT INTO hosts(
-              hostid,
+              name,
               username, hostname, ip,
               slurm_major, slurm_minor, slurm_patch,
               distro_name, distro_version, kernel_version,
@@ -408,7 +443,7 @@ impl HostStore {
             RETURNING id
             "#,
         )
-        .bind(&host.hostid)
+        .bind(&host.name)
         .bind(&host.username)
         .bind(hostname)
         .bind(ip.as_deref())
@@ -429,16 +464,16 @@ impl HostStore {
     }
 
     /// Upsert priority:
-    /// 1) If a row with `hostid` exists, update it.
-    /// 2) Else, if a row with (username, address) exists, update it and set/replace hostid.
+    /// 1) If a row with `name` exists, update it.
+    /// 2) Else, if a row with (username, address, port) exists, update it and set/replace name.
     /// 3) Else, insert a new row.
     pub async fn upsert_host(&self, host: &NewHost) -> Result<i64> {
-        if let Some(id) = self.find_id_by_hostid(&host.hostid).await? {
+        if let Some(id) = self.find_id_by_name(&host.name).await? {
             self.update_host(id, host).await?;
             return Ok(id);
         }
         if let Some(id) = self
-            .find_id_by_user_and_address(&host.username, &host.address)
+            .find_id_by_user_and_address(&host.username, &host.address, host.port)
             .await?
         {
             self.update_host(id, host).await?;
@@ -449,8 +484,8 @@ impl HostStore {
 
     /// Update a host by id with the values from `NewHost`.
     pub async fn update_host(&self, id: i64, host: &NewHost) -> Result<()> {
-        if host.hostid.trim().is_empty() {
-            return Err(HostStoreError::EmptyHostId);
+        if host.name.trim().is_empty() {
+            return Err(HostStoreError::EmptyName);
         }
         let (hostname, ip) = match &host.address {
             Address::Hostname(h) => (Some(h.as_str()), None),
@@ -464,7 +499,7 @@ impl HostStore {
         sqlx::query(
             r#"
             UPDATE hosts SET
-              hostid = ?1,
+              name = ?1,
               username = ?2,
               hostname = ?3,
               ip = ?4,
@@ -482,7 +517,7 @@ impl HostStore {
             WHERE id = ?16
             "#,
         )
-        .bind(&host.hostid)
+        .bind(&host.name)
         .bind(&host.username)
         .bind(hostname)
         .bind(ip.as_deref())
@@ -513,11 +548,11 @@ impl HostStore {
         Ok(res.rows_affected() as usize)
     }
 
-    /// Delete by `hostid`. Returns rows affected (0 or 1).
+    /// Delete by `name`. Returns rows affected (0 or 1).
     #[allow(dead_code)]
-    pub async fn delete_by_hostid(&self, hostid: &str) -> Result<usize> {
-        let res = sqlx::query("DELETE FROM hosts WHERE hostid = ?")
-            .bind(hostid)
+    pub async fn delete_by_name(&self, name: &str) -> Result<usize> {
+        let res = sqlx::query("DELETE FROM hosts WHERE name = ?")
+            .bind(name)
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected() as usize)
@@ -533,35 +568,38 @@ impl HostStore {
         Ok(row.map(row_to_host))
     }
 
-    /// Get a host by human-readable `hostid` (fast, uses unique index).
-    pub async fn get_by_hostid(&self, hostid: &str) -> Result<Option<HostRecord>> {
-        let row = sqlx::query("select * from hosts where hostid = ?")
-            .bind(hostid)
+    /// Get a host by human-readable `name` (fast, uses unique index).
+    pub async fn get_by_name(&self, name: &str) -> Result<Option<HostRecord>> {
+        let row = sqlx::query("select * from hosts where name = ?")
+            .bind(name)
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(row_to_host))
     }
 
-    /// Get by (username, hostname) or (username, ip).
+    /// Get by (username, hostname, port) or (username, ip, port).
     #[allow(dead_code)]
     pub async fn get_by_user_and_address(
         &self,
         username: &str,
         address: &Address,
+        port: u16,
     ) -> Result<Option<HostRecord>> {
         let row = match address {
             Address::Hostname(h) => {
-                sqlx::query("SELECT * FROM hosts WHERE username = ? AND hostname = ?")
+                sqlx::query("SELECT * FROM hosts WHERE username = ? AND hostname = ? AND port = ?")
                     .bind(username)
                     .bind(h)
+                    .bind(port)
                     .fetch_optional(&self.pool)
                     .await?
             }
             Address::Ip(ip) => {
                 let ip_s = ip.to_string();
-                sqlx::query("SELECT * FROM hosts WHERE username = ? AND ip = ?")
+                sqlx::query("SELECT * FROM hosts WHERE username = ? AND ip = ? AND port = ?")
                     .bind(username)
                     .bind(&ip_s)
+                    .bind(port)
                     .fetch_optional(&self.pool)
                     .await?
             }
@@ -589,9 +627,9 @@ impl HostStore {
 
     // --- internals ---
 
-    async fn find_id_by_hostid(&self, hostid: &str) -> Result<Option<i64>> {
-        let row = sqlx::query("SELECT id FROM hosts WHERE hostid = ? LIMIT 1")
-            .bind(hostid)
+    async fn find_id_by_name(&self, name: &str) -> Result<Option<i64>> {
+        let row = sqlx::query("SELECT id FROM hosts WHERE name = ? LIMIT 1")
+            .bind(name)
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.try_get::<i64, _>("id").unwrap()))
@@ -601,36 +639,38 @@ impl HostStore {
         &self,
         username: &str,
         address: &Address,
+        port: u16,
     ) -> Result<Option<i64>> {
-        let row = match address {
-            Address::Hostname(h) => {
-                sqlx::query("SELECT id FROM hosts WHERE username = ? AND hostname = ? LIMIT 1")
-                    .bind(username)
-                    .bind(h)
-                    .fetch_optional(&self.pool)
-                    .await?
-            }
-            Address::Ip(ip) => {
-                let ip_s = ip.to_string();
-                sqlx::query("SELECT id FROM hosts WHERE username = ? AND ip = ? LIMIT 1")
+        let row =
+            match address {
+                Address::Hostname(h) => sqlx::query(
+                    "SELECT id FROM hosts WHERE username = ? AND hostname = ? AND port = ? LIMIT 1",
+                )
+                .bind(username)
+                .bind(h)
+                .bind(port)
+                .fetch_optional(&self.pool)
+                .await?,
+                Address::Ip(ip) => {
+                    let ip_s = ip.to_string();
+                    sqlx::query(
+                        "SELECT id FROM hosts WHERE username = ? AND ip = ? AND port = ? LIMIT 1",
+                    )
                     .bind(username)
                     .bind(&ip_s)
+                    .bind(port)
                     .fetch_optional(&self.pool)
                     .await?
-            }
-        };
+                }
+            };
         Ok(row.map(|r| r.try_get::<i64, _>("id").unwrap()))
     }
     #[allow(dead_code)]
-    pub async fn upsert_partition_by_hostid(
-        &self,
-        hostid: &str,
-        spec: &NewPartition,
-    ) -> Result<i64> {
+    pub async fn upsert_partition_by_name(&self, name: &str, spec: &NewPartition) -> Result<i64> {
         let host_id = self
-            .find_id_by_hostid(hostid)
+            .find_id_by_name(name)
             .await?
-            .ok_or_else(|| HostStoreError::HostNotFound(hostid.into()))?;
+            .ok_or_else(|| HostStoreError::HostNotFound(name.into()))?;
         let info_text = spec.info.as_ref().map(|v| v.to_string());
         let rec = sqlx::query(r#"
         INSERT INTO partitions(host_id, name, info)
@@ -643,55 +683,55 @@ impl HostStore {
         Ok(rec.try_get::<i64, _>("id")?)
     }
     #[allow(dead_code)]
-    pub async fn get_partition_by_hostid_and_name(
+    pub async fn get_partition_by_name_and_partition_name(
         &self,
-        hostid: &str,
         name: &str,
+        partition_name: &str,
     ) -> Result<Option<PartitionRecord>> {
         let row = sqlx::query(
             r#"
         SELECT p.*
         FROM partitions AS p
         JOIN hosts AS h ON h.id = p.host_id
-        WHERE h.hostid = ?1 AND p.name = ?2
+        WHERE h.name = ?1 AND p.name = ?2
         LIMIT 1
     "#,
         )
-        .bind(hostid)
         .bind(name)
+        .bind(partition_name)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(row_to_partition))
     }
     #[allow(dead_code)]
-    pub async fn list_partitions_by_hostid(&self, hostid: &str) -> Result<Vec<PartitionRecord>> {
+    pub async fn list_partitions_by_name(&self, name: &str) -> Result<Vec<PartitionRecord>> {
         let rows = sqlx::query(
             r#"
         SELECT p.*
         FROM partitions p
         JOIN hosts h ON h.id = p.host_id
-        WHERE h.hostid = ?1
+        WHERE h.name = ?1
         ORDER BY p.name ASC
     "#,
         )
-        .bind(hostid)
+        .bind(name)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows.into_iter().map(row_to_partition).collect())
     }
     #[allow(dead_code)]
-    pub async fn replace_partitions_by_hostid(
+    pub async fn replace_partitions_by_name(
         &self,
-        hostid: &str,
+        name: &str,
         parts: &[NewPartition],
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
         let host_id = self
-            .find_id_by_hostid(hostid)
+            .find_id_by_name(name)
             .await?
-            .ok_or_else(|| HostStoreError::HostNotFound(hostid.to_string()))?;
+            .ok_or_else(|| HostStoreError::HostNotFound(name.to_string()))?;
 
         sqlx::query("DELETE FROM partitions WHERE host_id = ?")
             .bind(host_id)
@@ -716,27 +756,27 @@ impl HostStore {
         tx.commit().await?;
         Ok(())
     }
-    /// fetch a host (by hostid) along with all its partitions
+    /// fetch a host (by name) along with all its partitions
     #[allow(dead_code)]
-    pub async fn get_host_with_partitions_by_hostid(
+    pub async fn get_host_with_partitions_by_name(
         &self,
-        hostid: &str,
+        name: &str,
     ) -> Result<Option<(HostRecord, Vec<PartitionRecord>)>> {
-        let host = self.get_by_hostid(hostid).await?;
+        let host = self.get_by_name(name).await?;
         let Some(host) = host else { return Ok(None) };
-        let parts = self.list_partitions_by_hostid(hostid).await?;
+        let parts = self.list_partitions_by_name(name).await?;
         Ok(Some((host, parts)))
     }
 
     pub async fn insert_job(&self, job: &NewJob) -> Result<i64> {
         let rec = sqlx::query(
             r#"
-        insert into jobs(slurm_id, host_id, local_path, remote_path)
+        insert into jobs(scheduler_id, host_id, local_path, remote_path)
         values (?1, ?2, ?3, ?4)
         returning id;
     "#,
         )
-        .bind(job.slurm_id)
+        .bind(job.scheduler_id)
         .bind(job.host_id)
         .bind(job.local_path.clone())
         .bind(job.remote_path.clone())
@@ -751,7 +791,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs where host_id = ?1
             )
-            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.name as name
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -766,14 +806,14 @@ impl HostStore {
         let row = sqlx::query(
             r#"
             select aj.id as id,
-                   aj.slurm_id as slurm_id,
+                   aj.scheduler_id as scheduler_id,
                    aj.is_completed as is_completed,
                    aj.created_at as created_at,
                    aj.completed_at as completed_at,
                    aj.terminal_state as terminal_state,
                    aj.local_path as local_path,
                    aj.remote_path as remote_path,
-                   h.hostid as hostid
+                   h.name as name
             from jobs aj
             join hosts h on aj.host_id = h.id
             where aj.id = ?1
@@ -791,7 +831,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs
             )
-            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.name as name
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -805,7 +845,7 @@ impl HostStore {
     pub async fn list_running_jobs(&self) -> Result<Vec<JobRecord>> {
         let rows = sqlx::query(
             r#"
-            select aj.id as id, aj.slurm_id as slurm_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.hostid as hostid
+            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,h.name as name
             from jobs aj
             join hosts h
               on aj.host_id = h.id
@@ -863,7 +903,7 @@ fn row_to_host(row: sqlx::sqlite::SqliteRow) -> HostRecord {
     let accounting_available = row.try_get::<i64, _>("accounting_available").unwrap_or(0) != 0;
     HostRecord {
         id: row.try_get("id").unwrap(),
-        hostid: row.try_get("hostid").unwrap(),
+        name: row.try_get("name").unwrap(),
         username: row.try_get("username").unwrap(),
         address,
         slurm: SlurmVersion {
@@ -902,8 +942,8 @@ fn row_to_partition(row: sqlx::sqlite::SqliteRow) -> PartitionRecord {
 fn row_to_job(row: sqlx::sqlite::SqliteRow) -> JobRecord {
     JobRecord {
         id: row.try_get("id").unwrap(),
-        slurm_id: row.try_get("slurm_id").unwrap(),
-        host_id: row.try_get("hostid").unwrap(),
+        scheduler_id: row.try_get("scheduler_id").unwrap(),
+        name: row.try_get("name").unwrap(),
         created_at: row.try_get("created_at").unwrap(),
         finished_at: row.try_get("completed_at").unwrap(),
         is_completed: row.try_get("is_completed").unwrap(),
@@ -919,9 +959,9 @@ mod tests {
     use std::collections::HashMap;
     use std::net::IpAddr;
 
-    fn make_host(hostid: &str, username: &str, addr: Address) -> NewHost {
+    fn make_host(name: &str, username: &str, addr: Address) -> NewHost {
         NewHost {
-            hostid: hostid.into(),
+            name: name.into(),
             username: username.into(),
             address: addr,
             slurm: SlurmVersion {
@@ -942,45 +982,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn round_trip_by_hostid() {
+    async fn round_trip_by_name() {
         let db = HostStore::open_memory().await.unwrap();
         let host = make_host("gpu01", "bob", Address::Hostname("node-a".into()));
         let id = db.insert_host(&host).await.unwrap();
-        let got = db.get_by_hostid("gpu01").await.unwrap().unwrap();
+        let got = db.get_by_name("gpu01").await.unwrap().unwrap();
         assert_eq!(got.id, id);
-        assert_eq!(got.hostid, "gpu01");
+        assert_eq!(got.name, "gpu01");
     }
 
     #[tokio::test]
-    async fn upsert_prefers_hostid() {
+    async fn upsert_prefers_name() {
         let db = HostStore::open_memory().await.unwrap();
         let ip: IpAddr = "10.0.0.42".parse().unwrap();
 
         let first = make_host("c1", "carol", Address::Ip(ip));
         let id1 = db.upsert_host(&first).await.unwrap();
 
-        // Change fields and upsert with same hostid; should update same row.
+        // Change fields and upsert with same name; should update same row.
         let mut second = first.clone();
         second.kernel_version = "6.1.0-20-amd64".into();
         let id2 = db.upsert_host(&second).await.unwrap();
 
         assert_eq!(id1, id2);
-        let got = db.get_by_hostid("c1").await.unwrap().unwrap();
+        let got = db.get_by_name("c1").await.unwrap().unwrap();
         assert_eq!(got.kernel_version, "6.1.0-20-amd64");
     }
 
     // Edge cases start here.
 
     #[tokio::test]
-    async fn empty_hostid_rejected_on_insert() {
+    async fn empty_name_rejected_on_insert() {
         let db = HostStore::open_memory().await.unwrap();
         let host = make_host("", "alice", Address::Hostname("h1".into()));
         let err = db.insert_host(&host).await.unwrap_err();
-        matches!(err, HostStoreError::EmptyHostId);
+        matches!(err, HostStoreError::EmptyName);
     }
 
     #[tokio::test]
-    async fn duplicate_hostid_rejected_on_insert() {
+    async fn duplicate_name_rejected_on_insert() {
         let db = HostStore::open_memory().await.unwrap();
         let h1 = make_host("dup1", "u1", Address::Hostname("h1".into()));
         let h2 = make_host("dup1", "u2", Address::Hostname("h2".into()));
@@ -998,44 +1038,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_by_user_addr_replaces_hostid_if_new() {
+    async fn upsert_by_user_addr_replaces_name_if_new() {
         let db = HostStore::open_memory().await.unwrap();
 
-        // Initially store with hostid "old"
+        // Initially store with name "old"
         let h_old = make_host("old", "u", Address::Hostname("same-node".into()));
         let id = db.insert_host(&h_old).await.unwrap();
 
-        // Upsert same (username, address) but with a new hostid "new"
+        // Upsert same (username, address) but with a new name "new"
         let h_new = make_host("new", "u", Address::Hostname("same-node".into()));
         let id2 = db.upsert_host(&h_new).await.unwrap();
         assert_eq!(id, id2);
 
-        // Old id should disappear; new hostid should work.
-        assert!(db.get_by_hostid("old").await.unwrap().is_none());
-        let got = db.get_by_hostid("new").await.unwrap().unwrap();
+        // Old id should disappear; new name should work.
+        assert!(db.get_by_name("old").await.unwrap().is_none());
+        let got = db.get_by_name("new").await.unwrap().unwrap();
         assert_eq!(got.id, id);
-        assert_eq!(got.hostid, "new");
+        assert_eq!(got.name, "new");
     }
 
     #[tokio::test]
-    async fn get_by_hostid_not_found_returns_none() {
+    async fn get_by_name_not_found_returns_none() {
         let db = HostStore::open_memory().await.unwrap();
-        assert!(db.get_by_hostid("nope").await.unwrap().is_none());
+        assert!(db.get_by_name("nope").await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn delete_by_hostid_returns_0_when_missing_and_1_when_deleted() {
+    async fn delete_by_name_returns_0_when_missing_and_1_when_deleted() {
         let db = HostStore::open_memory().await.unwrap();
-        assert_eq!(db.delete_by_hostid("nope").await.unwrap(), 0);
+        assert_eq!(db.delete_by_name("nope").await.unwrap(), 0);
 
         let h = make_host("d1", "u", Address::Hostname("h".into()));
         db.insert_host(&h).await.unwrap();
-        assert_eq!(db.delete_by_hostid("d1").await.unwrap(), 1);
-        assert!(db.get_by_hostid("d1").await.unwrap().is_none());
+        assert_eq!(db.delete_by_name("d1").await.unwrap(), 1);
+        assert!(db.get_by_name("d1").await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn update_hostid_conflict_is_rejected() {
+    async fn update_name_conflict_is_rejected() {
         let db = HostStore::open_memory().await.unwrap();
 
         let a = make_host("a", "u", Address::Hostname("h1".into()));
@@ -1044,9 +1084,9 @@ mod tests {
         let id_a = db.insert_host(&a).await.unwrap();
         let id_b = db.insert_host(&b).await.unwrap();
 
-        // Try to change B's hostid to "a" (already taken)
+        // Try to change B's name to "a" (already taken)
         let mut b2 = b.clone();
-        b2.hostid = "a".into();
+        b2.name = "a".into();
         let err = db.update_host(id_b, &b2).await.unwrap_err();
 
         match err {
@@ -1057,7 +1097,7 @@ mod tests {
         }
 
         // Ensure A unaffected.
-        let a_fresh = db.get_by_hostid("a").await.unwrap().unwrap();
+        let a_fresh = db.get_by_name("a").await.unwrap().unwrap();
         assert_eq!(a_fresh.id, id_a);
     }
 
@@ -1068,28 +1108,28 @@ mod tests {
         let h = make_host("v6node", "alice", Address::Ip(ip));
         db.insert_host(&h).await.unwrap();
 
-        // Lookup by hostid
-        let got = db.get_by_hostid("v6node").await.unwrap().unwrap();
+        // Lookup by name
+        let got = db.get_by_name("v6node").await.unwrap().unwrap();
         match got.address {
             Address::Ip(parsed) => assert_eq!(parsed, ip),
             _ => panic!("expected IP address"),
         }
 
-        // Lookup by (username, ip)
+        // Lookup by (username, ip, port)
         let got2 = db
-            .get_by_user_and_address("alice", &Address::Ip(ip))
+            .get_by_user_and_address("alice", &Address::Ip(ip), 22)
             .await
             .unwrap();
         assert!(got2.is_some());
     }
 
     #[tokio::test]
-    async fn insert_and_retrieve_partitions_for_hostid() {
-        let hostid = "gpurig";
+    async fn insert_and_retrieve_partitions_for_name() {
+        let name = "gpurig";
         let db = HostStore::open_memory().await.unwrap();
         let ip: IpAddr = "2001:db8::1".parse().unwrap();
         let host = NewHost {
-            hostid: hostid.into(),
+            name: name.into(),
             username: "alice".into(),
             address: Address::Ip(ip),
             port: 22,
@@ -1122,9 +1162,9 @@ mod tests {
             name: "gpu".into(),
             info: Some(serde_json::to_value(&info_map).unwrap()),
         };
-        let _partition_id = db.upsert_partition_by_hostid(hostid, &spec).await.unwrap();
+        let _partition_id = db.upsert_partition_by_name(name, &spec).await.unwrap();
         let part = db
-            .get_partition_by_hostid_and_name(hostid, "gpu")
+            .get_partition_by_name_and_partition_name(name, "gpu")
             .await
             .unwrap()
             .expect("partition should exist");
@@ -1160,9 +1200,9 @@ mod tests {
         let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
         db.insert_host(&host).await.unwrap();
 
-        let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
+        let host_row = db.get_by_name("host-a").await.unwrap().unwrap();
         let job = NewJob {
-            slurm_id: Some(42),
+            scheduler_id: Some(42),
             host_id: host_row.id,
             local_path: "/tmp/local".into(),
             remote_path: "/remote/run".into(),
@@ -1172,8 +1212,8 @@ mod tests {
         let jobs = db.list_jobs_for_host(host_row.id).await.unwrap();
         assert_eq!(jobs.len(), 1);
         let got = &jobs[0];
-        assert_eq!(got.slurm_id, Some(42));
-        assert_eq!(got.host_id, "host-a");
+        assert_eq!(got.scheduler_id, Some(42));
+        assert_eq!(got.name, "host-a");
         assert_eq!(got.local_path, "/tmp/local");
         assert_eq!(got.remote_path, "/remote/run");
         assert!(!got.is_completed);
@@ -1188,9 +1228,9 @@ mod tests {
         let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
         db.insert_host(&host).await.unwrap();
 
-        let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
+        let host_row = db.get_by_name("host-a").await.unwrap().unwrap();
         let job = NewJob {
-            slurm_id: Some(42),
+            scheduler_id: Some(42),
             host_id: host_row.id,
             local_path: "/tmp/local-a".into(),
             remote_path: "/remote/run-a".into(),
@@ -1199,8 +1239,8 @@ mod tests {
 
         let got = db.get_job_by_job_id(job_id).await.unwrap().unwrap();
         assert_eq!(got.id, job_id);
-        assert_eq!(got.slurm_id, Some(42));
-        assert_eq!(got.host_id, "host-a");
+        assert_eq!(got.scheduler_id, Some(42));
+        assert_eq!(got.name, "host-a");
     }
 
     #[tokio::test]
@@ -1209,15 +1249,15 @@ mod tests {
         let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
         db.insert_host(&host).await.unwrap();
 
-        let host_row = db.get_by_hostid("host-a").await.unwrap().unwrap();
+        let host_row = db.get_by_name("host-a").await.unwrap().unwrap();
         let job1 = NewJob {
-            slurm_id: Some(101),
+            scheduler_id: Some(101),
             host_id: host_row.id,
             local_path: "/tmp/local1".into(),
             remote_path: "/remote/run1".into(),
         };
         let job2 = NewJob {
-            slurm_id: Some(102),
+            scheduler_id: Some(102),
             host_id: host_row.id,
             local_path: "/tmp/local2".into(),
             remote_path: "/remote/run2".into(),

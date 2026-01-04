@@ -3,6 +3,7 @@
 
 use crate::ssh::{SyncFilterAction, SyncFilterRule};
 use crate::state::db::{HostRecord, HostStore, JobRecord};
+use crate::agent::error_codes;
 use proto::{ListClustersUnitResponse, ListJobsUnitResponse};
 use proto::{SubmitPathFilterAction, SubmitPathFilterRule, list_clusters_unit_response};
 use tonic::Status;
@@ -16,15 +17,11 @@ pub fn build_sync_filters(
             Ok(SubmitPathFilterAction::Include) => SyncFilterAction::Include,
             Ok(SubmitPathFilterAction::Exclude) => SyncFilterAction::Exclude,
             _ => {
-                return Err(Status::invalid_argument(
-                    "submit filter action must be include or exclude",
-                ));
+                return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
             }
         };
         if rule.pattern.trim().is_empty() {
-            return Err(Status::invalid_argument(
-                "submit filter pattern cannot be empty",
-            ));
+            return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
         }
         out.push(SyncFilterRule {
             action,
@@ -34,28 +31,20 @@ pub fn build_sync_filters(
     Ok(out)
 }
 
-pub async fn get_default_base_path(hs: &HostStore, hid: &str) -> Result<String, Status> {
-    let host_data = match hs.get_by_hostid(hid).await {
+pub async fn get_default_base_path(hs: &HostStore, name: &str) -> Result<String, Status> {
+    let host_data = match hs.get_by_name(name).await {
         Ok(Some(v)) => v,
         Ok(None) => {
-            return Err(Status::invalid_argument(format!(
-                "hostid {} is unknown",
-                hid
-            )));
+            return Err(Status::invalid_argument(error_codes::NOT_FOUND));
         }
         Err(e) => {
-            return Err(Status::internal(format!(
-                "could not retrieve default_base_path for {} from app's db: {}",
-                hid, e
-            )));
+            log::debug!("could not retrieve default_base_path for {name}: {e}");
+            return Err(Status::internal(error_codes::INTERNAL_ERROR));
         }
     };
     match host_data.default_base_path {
         Some(v) => Ok(v),
-        None => Err(Status::invalid_argument(format!(
-            "default_base_path for {} is not set",
-            hid,
-        ))),
+        None => Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT)),
     }
 }
 
@@ -73,7 +62,7 @@ pub fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitR
         },
         port: hs.port as i32,
         connected: false,
-        hostid: hs.hostid.to_owned(),
+        name: hs.name.to_owned(),
         accounting_available: hs.accounting_available,
         default_base_path: hs.default_base_path.to_owned(),
     }
@@ -81,9 +70,9 @@ pub fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitR
 
 pub fn db_job_record_to_api_unit_response(jr: &JobRecord) -> ListJobsUnitResponse {
     ListJobsUnitResponse {
-        hostid: jr.host_id.clone(),
+        name: jr.name.clone(),
         job_id: jr.id,
-        slurm_id: jr.slurm_id,
+        scheduler_id: jr.scheduler_id,
         created_at: jr.created_at.clone(),
         finished_at: jr.finished_at.clone(),
         is_completed: jr.is_completed,

@@ -106,4 +106,16 @@ impl SessionManager {
             Some(_) => false,
         }
     }
+
+    pub fn matches_params(&self, params: &SshParams) -> bool {
+        self.params == *params
+    }
+
+    pub async fn shutdown(&self) {
+        if let Some(task) = self.keepalive_task_handle.lock().await.take() {
+            task.abort();
+        }
+        let mut handle_field = self.handle.lock().await;
+        let _ = handle_field.take();
+    }
 }

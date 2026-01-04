@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Alex Sizykh
 
+use crate::agent::error_codes;
 use crate::util::remote_path::resolve_relative;
 use std::path::PathBuf;
 use tonic::Status;
@@ -13,9 +14,7 @@ pub fn resolve_submit_remote_path(
     match remote_path {
         Some(v) => {
             if v.is_empty() {
-                return Err(Status::invalid_argument(
-                    "remote path can't be empty: either provide non-empty remote path or omit it completely",
-                ));
+                return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
             }
             if PathBuf::from(v).is_absolute() {
                 Ok(v.to_string())
@@ -45,7 +44,7 @@ mod tests {
     #[test]
     fn resolve_submit_remote_path_handles_variants() {
         let err = resolve_submit_remote_path(Some(""), "/base", "run").unwrap_err();
-        assert!(err.message().contains("remote path can't be empty"));
+        assert_eq!(err.message(), error_codes::INVALID_ARGUMENT);
 
         let absolute = resolve_submit_remote_path(Some("/abs/path"), "/base", "run").unwrap();
         assert_eq!(absolute, "/abs/path");

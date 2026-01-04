@@ -1,5 +1,5 @@
 syntax = "proto3";
-package  agent.v1;
+package agent.v1;
 
 // A single prompt displayed during keyboard-interactive auth (e.g. "Duo code:").
 message Prompt {
@@ -9,8 +9,8 @@ message Prompt {
 
 // MFA prompt bundle (a single "round" of keyboard-interactive).
 message MfaPrompt {
-  string name = 1;          // e.g. "Duo Security"
-  string instructions = 2;  // Free text instructions
+  string name = 1; // e.g. "Duo Security"
+  string instructions = 2; // Free text instructions
   repeated Prompt prompts = 3;
 }
 
@@ -23,11 +23,11 @@ message MfaAnswer {
 // Server->client stream items while running a command.
 message StreamEvent {
   oneof event {
-    bytes stdout = 1;        // Chunk from STDOUT
-    bytes stderr = 2;        // Chunk from STDERR
-    int32 exit_code = 3;     // Exit code (emitted once when known)
-    MfaPrompt mfa = 4;       // MFA prompt round
-    string error = 5;        // Fatal error (connection/auth/exec)
+    bytes stdout = 1; // Chunk from STDOUT
+    bytes stderr = 2; // Chunk from STDERR
+    int32 exit_code = 3; // Exit code (emitted once when known)
+    MfaPrompt mfa = 4; // MFA prompt round
+    string error = 5; // Fatal error (connection/auth/exec)
   }
 }
 
@@ -38,7 +38,7 @@ message SubmitStatus {
     TRANSFER_START = 2;
     TRANSFER_DONE = 3;
   }
-  string hostid = 1;
+  string name = 1;
   string remote_path = 2;
   Phase phase = 3;
 }
@@ -57,19 +57,20 @@ message SubmitResult {
 // Server->client stream items while submitting a job.
 message SubmitStreamEvent {
   oneof event {
-    bytes stdout = 1;        // Chunk from STDOUT
-    bytes stderr = 2;        // Chunk from STDERR
-    int32 exit_code = 3;     // Exit code (emitted once when known)
-    MfaPrompt mfa = 4;       // MFA prompt round
-    string error = 5;        // Fatal error (connection/auth/exec)
+    bytes stdout = 1; // Chunk from STDOUT
+    bytes stderr = 2; // Chunk from STDERR
+    int32 exit_code = 3; // Exit code (emitted once when known)
+    MfaPrompt mfa = 4; // MFA prompt round
+    string error = 5; // Fatal error (connection/auth/exec)
     SubmitStatus submit_status = 6; // Submit progress updates
     SubmitResult submit_result = 7; // Submit final status
   }
 }
 
 message LsRequestInit {
-  string hostid = 1;       // host identifier
-  optional string path = 2; // path to list (absolute or relative to default_base_path)
+  string name = 1; // cluster name (optional if job_id is set)
+  optional string path = 2; // path to list (absolute or relative to base path)
+  optional int64 job_id = 3; // job id to list from (uses job's cluster)
 }
 
 // Client -> Server
@@ -82,8 +83,8 @@ message LsRequest {
 
 message RetrieveJobRequestInit {
   int64 job_id = 1; // internal job id from the daemon
-  optional string hostid = 2; // optional host identifier to validate ownership
-  string path = 3;         // remote path (absolute or relative to run folder)
+  optional string name = 2; // optional cluster name to validate ownership
+  string path = 3; // remote path (absolute or relative to run folder)
   optional string local_path = 4; // local destination base path
 }
 
@@ -94,15 +95,10 @@ message RetrieveJobRequest {
   }
 }
 
-
-
-
-
-
 message SubmitRequestInit {
-  string local_path = 1;  // local project path
+  string local_path = 1; // local project path
   optional string remote_path = 2; // path to where to locate the remote project
-  string hostid = 3;      // host identifier - should be something easy to remember
+  string name = 3; // cluster name - should be something easy to remember
   string sbatchscript = 4;
   repeated SubmitPathFilterRule filters = 5; // ordered include/exclude rules, rsync-style
 }
@@ -119,15 +115,33 @@ message SubmitPathFilterRule {
 }
 
 message AddClusterInit {
-  string hostid = 1;  // memorable host identifier
+  string name = 1; // memorable cluster name
   string username = 2; // path to where to locate the remote project
   oneof host {
-    string hostname = 3;      // host identifier - should be something easy to remember
+    string hostname = 3; // hostname or IP address
     string ipaddr = 4;
   }
   optional string identity_path = 5;
   uint32 port = 6;
   optional string default_base_path = 7;
+}
+
+message ResolveHomeDirRequestInit {
+  string username = 1;
+  oneof host {
+    string hostname = 2;
+    string ipaddr = 3;
+  }
+  optional string identity_path = 4;
+  uint32 port = 5;
+  optional string name = 6;
+}
+
+message ResolveHomeDirRequest {
+  oneof msg {
+    ResolveHomeDirRequestInit init = 1;
+    MfaAnswer mfa = 2;
+  }
 }
 message ListClustersRequest {
   string filter = 1;
@@ -142,38 +156,40 @@ message ListClustersUnitResponse {
     string ipaddr = 5;
   }
   bool connected = 6;
-  string hostid = 7;
+  string name = 7;
   bool accounting_available = 8;
   optional string default_base_path = 9;
 }
 
-
-
-
 message ListJobsRequest {
-  optional string hostid = 1;
+  optional string name = 1;
 }
 
 message ListClustersResponse {
   repeated ListClustersUnitResponse clusters = 1;
 }
 
+message DeleteClusterRequest {
+  string name = 1;
+}
 
+message DeleteClusterResponse {
+  bool deleted = 1;
+}
 
 message ListJobsUnitResponse {
-  string hostid = 1;
+  string name = 1;
   int64 job_id = 2;
-  optional int64 slurm_id = 3;
+  optional int64 scheduler_id = 3;
   string created_at = 4;
   optional string finished_at = 5;
   bool is_completed = 6;
-  optional string terminal_state = 7; // SLURM terminal state when known (e.g., COMPLETED, FAILED)
+  optional string terminal_state = 7; // Scheduler terminal state when known (COMPLETED, FAILED)
 }
 
 message ListJobsResponse {
   repeated ListJobsUnitResponse jobs = 1;
 }
-
 
 // Client -> Server
 message SubmitRequest {
@@ -189,10 +205,14 @@ message AddClusterRequest {
   }
 }
 
-message PingRequest { string message = 1; }
+message PingRequest {
+  string message = 1;
+}
 
+message PingReply {
+  string message = 1;
+}
 
-message PingReply { string message = 1; }
 // One bidirectional streaming method keeps MFA + output on a single pipe.
 service Agent {
   rpc Ping(PingRequest) returns (PingReply);
@@ -200,6 +220,8 @@ service Agent {
   rpc RetrieveJob(stream RetrieveJobRequest) returns (stream StreamEvent);
   rpc Submit(stream SubmitRequest) returns (stream SubmitStreamEvent);
   rpc AddCluster(stream AddClusterRequest) returns (stream StreamEvent);
+  rpc ResolveHomeDir(stream ResolveHomeDirRequest) returns (stream StreamEvent);
   rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
+  rpc DeleteCluster(DeleteClusterRequest) returns (DeleteClusterResponse);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
 }

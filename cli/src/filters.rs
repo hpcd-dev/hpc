@@ -5,7 +5,10 @@ use clap::ArgMatches;
 use proto::{SubmitPathFilterAction, SubmitPathFilterRule};
 
 pub fn submit_filters_from_matches(matches: &ArgMatches) -> Vec<SubmitPathFilterRule> {
-    let Some(("submit", sub_matches)) = matches.subcommand() else {
+    let Some(("job", job_matches)) = matches.subcommand() else {
+        return Vec::new();
+    };
+    let Some(("submit", sub_matches)) = job_matches.subcommand() else {
         return Vec::new();
     };
 
@@ -47,6 +50,7 @@ mod tests {
     fn submit_filters_preserve_flag_order() {
         let matches = Cli::command().get_matches_from([
             "hpc",
+            "job",
             "submit",
             "cluster-a",
             "./project",

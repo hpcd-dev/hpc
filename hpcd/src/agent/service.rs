@@ -3,6 +3,7 @@
 
 use crate::agent::sessions::{DefaultSessionFactory, SessionCache, SessionFactory};
 use crate::agent::types::{AgentSvcError, OutStream};
+use crate::agent::error_codes;
 use crate::ssh::SessionManager;
 use crate::ssh::receiver_to_stream;
 use crate::state::db::{HostStore, JobRecord};
@@ -65,28 +66,25 @@ impl AgentSvc {
 
         let mut host_map = HashMap::new();
         for host in hosts {
-            host_map.insert(host.hostid.clone(), host);
+            host_map.insert(host.name.clone(), host);
         }
 
         let mut jobs_by_host: HashMap<String, Vec<JobRecord>> = HashMap::new();
         for job in jobs {
-            jobs_by_host
-                .entry(job.host_id.clone())
-                .or_default()
-                .push(job);
+            jobs_by_host.entry(job.name.clone()).or_default().push(job);
         }
 
         let mut completed_ids: Vec<(i64, Option<String>)> = Vec::new();
-        for (hostid, host_jobs) in jobs_by_host {
-            let Some(host) = host_map.get(&hostid) else {
-                log::warn!("host record missing for running job on '{hostid}'");
+        for (name, host_jobs) in jobs_by_host {
+            let Some(host) = host_map.get(&name) else {
+                log::warn!("host record missing for running job on '{name}'");
                 continue;
             };
 
-            let sm = match self.get_sessionmanager(&hostid).await {
+            let sm = match self.get_sessionmanager(&name).await {
                 Ok(v) => v,
                 Err(e) => {
-                    log::warn!("failed to get session for {hostid}: {e}");
+                    log::warn!("failed to get session for {name}: {e}");
                     continue;
                 }
             };
@@ -97,14 +95,14 @@ impl AgentSvc {
                 let (mfa_tx, mut mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(1);
                 drop(mfa_tx);
                 if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
-                    log::warn!("failed to connect to {hostid} for job checks: {e}");
+                    log::warn!("failed to connect to {name} for job checks: {e}");
                     continue;
                 }
             }
 
             for job in host_jobs {
-                let Some(job_id) = job.slurm_id else {
-                    log::warn!("job {} has no slurm id; skipping", job.id);
+                let Some(job_id) = job.scheduler_id else {
+                    log::warn!("job {} has no scheduler id; skipping", job.id);
                     continue;
                 };
 
@@ -113,13 +111,13 @@ impl AgentSvc {
                     let (out, err, code) = match sm.exec_capture(&command).await {
                         Ok(v) => v,
                         Err(e) => {
-                            log::warn!("sacct check failed on {hostid} for {job_id}: {e}");
+                            log::warn!("sacct check failed on {name} for {job_id}: {e}");
                             continue;
                         }
                     };
                     if code != 0 {
                         log::warn!(
-                            "sacct returned {} on {hostid} for {job_id}: {}",
+                            "sacct returned {} on {name} for {job_id}: {}",
                             code,
                             String::from_utf8_lossy(&err)
                         );
@@ -129,9 +127,7 @@ impl AgentSvc {
                     let terminal_state = match crate::agent::slurm::sacct_terminal_state(&output) {
                         Some(v) => v,
                         None => {
-                            log::debug!(
-                                "sacct returned no terminal state for {hostid} job {job_id}"
-                            );
+                            log::debug!("sacct returned no terminal state for {name} job {job_id}");
                             continue;
                         }
                     };
@@ -141,13 +137,13 @@ impl AgentSvc {
                     let (out, err, code) = match sm.exec_capture(&command).await {
                         Ok(v) => v,
                         Err(e) => {
-                            log::warn!("squeue check failed on {hostid} for {job_id}: {e}");
+                            log::warn!("squeue check failed on {name} for {job_id}: {e}");
                             continue;
                         }
                     };
                     if code != 0 {
                         log::warn!(
-                            "squeue returned {} on {hostid} for {job_id}: {}",
+                            "squeue returned {} on {name} for {job_id}: {}",
                             code,
                             String::from_utf8_lossy(&err)
                         );
@@ -179,13 +175,13 @@ impl AgentSvc {
 
     pub async fn get_sessionmanager(
         &self,
-        hostid: &str,
+        name: &str,
     ) -> Result<Arc<SessionManager>, AgentSvcError> {
-        if let Some(existing) = self.sessions.get(hostid).await {
+        if let Some(existing) = self.sessions.get(name).await {
             return Ok(existing);
         }
 
-        let maybe_hostrecord = match self.hosts.get_by_hostid(hostid).await {
+        let maybe_hostrecord = match self.hosts.get_by_name(name).await {
             Ok(v) => v,
             Err(e) => {
                 return Err(AgentSvcError::DatabaseError {
@@ -194,41 +190,43 @@ impl AgentSvc {
             }
         };
         let Some(host) = maybe_hostrecord else {
-            return Err(AgentSvcError::UnknownHostId);
+            return Err(AgentSvcError::UnknownName);
         };
-        self.sessions.get_or_create(hostid, &host).await
+        self.sessions.get_or_create(name, &host).await
     }
 
     pub async fn run_command(
         &self,
         command: String,
-        hostid: &str,
+        name: &str,
         mfa_rx: tokio::sync::mpsc::Receiver<MfaAnswer>,
     ) -> Result<tonic::Response<OutStream>, Status> {
         let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
-        let mgr = match self.get_sessionmanager(hostid).await {
+        let mgr = match self.get_sessionmanager(name).await {
             Ok(v) => v,
             Err(e) => match e {
-                AgentSvcError::UnknownHostId => {
-                    return Err(Status::invalid_argument(format!("unknown hostid {hostid}")));
+                AgentSvcError::UnknownName => {
+                    return Err(Status::invalid_argument(error_codes::NOT_FOUND));
                 }
                 AgentSvcError::NetworkError(e) => {
-                    return Err(Status::internal(format!("network error: {e}")));
+                    log::debug!("network error while resolving session manager: {e}");
+                    return Err(Status::internal(error_codes::NETWORK_ERROR));
                 }
                 other_error => {
-                    return Err(Status::internal(format!(
-                        "unexpected error: {}",
-                        other_error
-                    )));
+                    log::debug!("unexpected error while resolving session manager: {other_error}");
+                    return Err(Status::internal(error_codes::INTERNAL_ERROR));
                 }
             },
         };
         let cmd = command;
         tokio::spawn(async move {
             if let Err(err) = mgr.exec(&cmd, evt_tx.clone(), mfa_rx).await {
+                log::debug!("command execution failed: {err}");
                 let _ = evt_tx
                     .send(Ok(StreamEvent {
-                        event: Some(stream_event::Event::Error(err.to_string())),
+                        event: Some(stream_event::Event::Error(
+                            error_codes::REMOTE_ERROR.to_string(),
+                        )),
                     }))
                     .await;
             }
@@ -262,9 +260,9 @@ mod tests {
         }
     }
 
-    fn make_host(hostid: &str, username: &str, addr: Address) -> NewHost {
+    fn make_host(name: &str, username: &str, addr: Address) -> NewHost {
         NewHost {
-            hostid: hostid.into(),
+            name: name.into(),
             username: username.into(),
             address: addr,
             port: 2222,

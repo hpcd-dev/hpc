@@ -3,10 +3,10 @@
 
 use anyhow::bail;
 use clap::{CommandFactory, FromArgMatches};
-use cli::args::{Cli, ClusterCmd, Cmd, JobCmd, SubmitArgs};
+use cli::args::{Cli, ClusterCmd, Cmd, JobCmd};
 use cli::client::{
-    fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_job_retrieve, send_ls, send_ping,
-    send_submit,
+    fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_delete_cluster, send_job_ls,
+    send_job_retrieve, send_ls, send_ping, send_resolve_home_dir, send_submit,
 };
 use cli::filters::submit_filters_from_matches;
 use cli::format::{
@@ -14,19 +14,15 @@ use cli::format::{
     format_clusters_table, format_job_details, format_job_details_json, format_jobs_json,
     format_jobs_table,
 };
-use cli::interactive::resolve_add_cluster_args;
+use cli::interactive::{
+    confirm_action, prompt_default_base_path, resolve_add_cluster_args,
+    validate_default_base_path_with_feedback,
+};
 use cli::sbatch::resolve_sbatch_script;
 use proto::ListJobsUnitResponse;
 use proto::agent_client::AgentClient;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::PathBuf;
-
-const BANNER: &str = r#"██╗  ██╗██████╗  ██████╗
-██║  ██║██╔══██╗██╔════╝
-███████║██████╔╝██║
-██╔══██║██╔═══╝ ██║
-██║  ██║██║     ╚██████╗
-╚═╝  ╚═╝╚═╝      ╚═════╝"#;
 
 const HELP_TEMPLATE: &str = r#"██╗  ██╗██████╗  ██████╗
 ██║  ██║██╔══██╗██╔════╝
@@ -39,20 +35,6 @@ const HELP_TEMPLATE: &str = r#"██╗  ██╗██████╗  ██
 
 {all-args}{after-help}
 "#;
-
-fn print_banner() {
-    println!("{BANNER}\n");
-}
-
-fn print_banner_if_interactive(headless: bool) {
-    if headless {
-        return;
-    }
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return;
-    }
-    print_banner();
-}
 
 fn apply_help_template_recursively(cmd: &mut clap::Command) {
     let mut owned = std::mem::take(cmd);
@@ -78,40 +60,41 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => bail!(e),
             }
         }
-        Cmd::Ls(args) => {
-            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
-            send_ls(&mut client, &args.hostid, &args.path).await?
-        }
-        Cmd::Submit(SubmitArgs {
-            hostid,
-            local_path,
-            remote_path,
-            sbatchscript,
-            headless,
-            ..
-        }) => {
-            print_banner_if_interactive(headless);
-            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
-            let local_path_buf = PathBuf::from(&local_path);
-            println!("Submitting job...");
-            println!("hostid: {hostid}");
-            let _ = std::io::stdout().flush();
-            let sbatchscript =
-                resolve_sbatch_script(&local_path_buf, sbatchscript.as_deref(), headless)?;
-            println!("selected sbatch script: {sbatchscript}");
-            send_submit(
-                &mut client,
-                &hostid,
-                &local_path,
-                &remote_path,
-                &sbatchscript,
-                &submit_filters,
-            )
-            .await?
-        }
         Cmd::Job(job_args) => {
             let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
             match job_args.cmd {
+                JobCmd::Submit(args) => {
+                    let local_path_buf = PathBuf::from(&args.local_path);
+                    let response = fetch_list_clusters(&mut client, "").await?;
+                    if !response
+                        .clusters
+                        .iter()
+                        .any(|cluster| cluster.name == args.name)
+                    {
+                        bail!(
+                            "cluster '{}' not found; use 'cluster add' to create it",
+                            args.name
+                        );
+                    }
+                    println!("Submitting job...");
+                    println!("Name: {}", args.name);
+                    let _ = std::io::stdout().flush();
+                    let sbatchscript = resolve_sbatch_script(
+                        &local_path_buf,
+                        args.sbatchscript.as_deref(),
+                        args.headless,
+                    )?;
+                    println!("selected sbatch script: {sbatchscript}");
+                    send_submit(
+                        &mut client,
+                        &args.name,
+                        &args.local_path,
+                        &args.remote_path,
+                        &sbatchscript,
+                        &submit_filters,
+                    )
+                    .await?
+                }
                 JobCmd::List(args) => {
                     let response = fetch_list_jobs(&mut client, args.cluster).await?;
                     if args.json {
@@ -154,6 +137,9 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                JobCmd::Ls(args) => {
+                    send_job_ls(&mut client, args.job_id, &args.path, &args.cluster).await?
+                }
                 JobCmd::Retrieve(args) => {
                     send_job_retrieve(
                         &mut client,
@@ -183,9 +169,9 @@ async fn main() -> anyhow::Result<()> {
                     let Some(cluster) = response
                         .clusters
                         .iter()
-                        .find(|cluster| cluster.hostid == args.hostid)
+                        .find(|cluster| cluster.name == args.name)
                     else {
-                        bail!("cluster '{}' not found", args.hostid);
+                        bail!("cluster '{}' not found", args.name);
                     };
                     if args.json {
                         let output = format_cluster_details_json(cluster)?;
@@ -194,56 +180,101 @@ async fn main() -> anyhow::Result<()> {
                         print!("{}", format_cluster_details(cluster));
                     }
                 }
+                ClusterCmd::Ls(args) => {
+                    send_ls(&mut client, &args.name, &args.path).await?
+                }
                 ClusterCmd::Add(args) => {
-                    print_banner_if_interactive(args.headless);
                     println!("Adding new cluster...");
-                    let resolved = resolve_add_cluster_args(args)?;
+                    let headless = args.headless;
                     let response = fetch_list_clusters(&mut client, "").await?;
-                    if response
+                    let existing_names = response
                         .clusters
                         .iter()
-                        .any(|cluster| cluster.hostid == resolved.hostid)
-                    {
-                        bail!(
-                            "cluster '{}' already exists; use 'cluster set' to update it",
-                            resolved.hostid
-                        );
-                    }
+                        .map(|cluster| cluster.name.clone())
+                        .collect::<std::collections::HashSet<_>>();
+                    let mut resolved = resolve_add_cluster_args(args, &existing_names)?;
                     if let Some(host) = resolved.hostname.as_deref().or(resolved.ip.as_deref()) {
-                        if response.clusters.iter().any(|cluster| {
+                        if let Some(existing) = response.clusters.iter().find(|cluster| {
                             cluster.username == resolved.username
                                 && cluster_host_string(cluster) == host
+                                && cluster.port == resolved.port as i32
                         }) {
                             bail!(
-                                "cluster '{}' with address '{}' already exists; use 'cluster set' to update it",
+                                "another cluster with name '{}' is already using {}:{}:{}; use 'cluster set' to update it.",
+                                existing.name,
                                 resolved.username,
-                                host
+                                host,
+                                resolved.port
                             );
+                        }
+                    }
+                    let mut needs_base_path_prompt = resolved.default_base_path.is_none();
+                    if let Some(ref value) = resolved.default_base_path {
+                        if let Err(err) =
+                            validate_default_base_path_with_feedback(value, false, headless)
+                        {
+                            if headless {
+                                return Err(err);
+                            }
+                            eprintln!("Default base path '{value}' is invalid: {err}");
+                            needs_base_path_prompt = true;
+                        }
+                    }
+                    if needs_base_path_prompt {
+                        let home_dir = send_resolve_home_dir(
+                            &mut client,
+                            &resolved.name,
+                            &resolved.username,
+                            &resolved.hostname,
+                            &resolved.ip,
+                            Some(resolved.identity_path.as_str()),
+                            resolved.port,
+                        )
+                        .await?;
+                        loop {
+                            let base_path = prompt_default_base_path(&home_dir)?;
+                            match validate_default_base_path_with_feedback(
+                                &base_path,
+                                true,
+                                headless,
+                            ) {
+                                Ok(()) => {
+                                    resolved.default_base_path = Some(base_path);
+                                    break;
+                                }
+                                Err(err) => {
+                                    if headless {
+                                        return Err(err);
+                                    }
+                                    eprintln!("Default base path '{base_path}' is invalid: {err}");
+                                }
+                            }
                         }
                     }
                     send_add_cluster(
                         &mut client,
-                        &resolved.hostid,
+                        &resolved.name,
                         &resolved.username,
                         &resolved.hostname,
                         &resolved.ip,
                         Some(resolved.identity_path.as_str()),
                         resolved.port,
                         &resolved.default_base_path,
+                        true,
                     )
                     .await?;
-                    println!("Cluster {} added successfully!", resolved.hostid);
+                    println!("Cluster {} added successfully!", resolved.name);
                 }
                 ClusterCmd::Set(args) => {
                     let response = fetch_list_clusters(&mut client, "").await?;
                     let Some(cluster) = response
                         .clusters
                         .iter()
-                        .find(|cluster| cluster.hostid == args.hostid)
+                        .find(|cluster| cluster.name == args.name)
                     else {
                         bail!(
                             "cluster '{}' not found; use 'cluster add' to create it",
-                            args.hostid
+                            args.name
                         );
                     };
                     let (hostname, ip) = match args.ip.as_ref() {
@@ -258,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                             None => {
                                 bail!(
                                     "cluster '{}' has no address; pass --ip to update it",
-                                    args.hostid
+                                    args.name
                                 );
                             }
                         },
@@ -269,7 +300,7 @@ async fn main() -> anyhow::Result<()> {
                             Ok(port) => port,
                             Err(_) => bail!(
                                 "cluster '{}' has invalid port '{}'",
-                                args.hostid,
+                                args.name,
                                 cluster.port
                             ),
                         },
@@ -284,15 +315,47 @@ async fn main() -> anyhow::Result<()> {
                         .or_else(|| cluster.default_base_path.clone());
                     send_add_cluster(
                         &mut client,
-                        &cluster.hostid,
+                        &cluster.name,
                         &cluster.username,
                         &hostname,
                         &ip,
                         identity_path.as_deref(),
                         port,
                         &default_base_path,
+                        false,
                     )
                     .await?
+                }
+                ClusterCmd::Delete(args) => {
+                    let response = fetch_list_clusters(&mut client, "").await?;
+                    if !response
+                        .clusters
+                        .iter()
+                        .any(|cluster| cluster.name == args.name)
+                    {
+                        bail!("cluster name '{}' is not known", args.name);
+                    }
+                    println!(
+                        "WARNING:\nThis will delete cluster '{}' and all its job records from the local database.",
+                        args.name
+                    );
+                    println!("Any active SSH sessions for this cluster will be closed.");
+                    println!("This action cannot be undone.");
+                    if !args.yes {
+                        let confirmed = confirm_action(
+                            "Continue with delete? (yes/no): ",
+                            "Type yes to confirm, no to cancel.",
+                        )?;
+                        if !confirmed {
+                            println!("Delete canceled.");
+                            return Ok(());
+                        }
+                    }
+                    let response = send_delete_cluster(&mut client, &args.name).await?;
+                    if !response.deleted {
+                        bail!("cluster name '{}' is not known", args.name);
+                    }
+                    println!("Cluster '{}' deleted.", args.name);
                 }
             }
         }

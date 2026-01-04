@@ -1,16 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Alex Sizykh
 
+use crate::errors::{format_server_error, format_status_error};
 use crate::mfa::collect_mfa_answers;
 use anyhow::bail;
+use crossterm::{
+    execute,
+    style::{Color, Print, ResetColor, SetForegroundColor},
+};
 use proto::{
     MfaAnswer, StreamEvent, SubmitStreamEvent, stream_event, submit_result, submit_status,
     submit_stream_event,
 };
 use ratatui::symbols::braille;
 use std::future::Future;
-use std::io::Write;
-use tokio::time::Duration;
+use std::io::{IsTerminal, Write};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 
@@ -79,6 +85,102 @@ impl Spinner {
     }
 }
 
+pub struct MinDurationSpinner {
+    spinner: Spinner,
+    started_at: Instant,
+    min_duration: Duration,
+}
+
+impl MinDurationSpinner {
+    pub fn start(message: &str, min_duration: Duration) -> Self {
+        Self {
+            spinner: Spinner::start(message),
+            started_at: Instant::now(),
+            min_duration,
+        }
+    }
+
+    pub async fn stop(self, done_message: Option<&str>) {
+        let elapsed = self.started_at.elapsed();
+        if elapsed < self.min_duration {
+            sleep(self.min_duration - elapsed).await;
+        }
+        self.spinner.stop(done_message).await;
+    }
+
+    pub async fn cancel(self) {
+        self.spinner.stop(None).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+struct ProgressSpinner {
+    message: String,
+    spinner: Option<Spinner>,
+    started_at: Instant,
+    min_duration: Duration,
+}
+
+impl ProgressSpinner {
+    fn start(message: &str, min_duration: Duration) -> Self {
+        Self {
+            message: message.to_string(),
+            spinner: Some(Spinner::start(message)),
+            started_at: Instant::now(),
+            min_duration,
+        }
+    }
+
+    async fn pause(&mut self) {
+        if let Some(spinner) = self.spinner.take() {
+            spinner.stop(None).await;
+        }
+    }
+
+    async fn resume(&mut self) {
+        if self.spinner.is_none() {
+            self.spinner = Some(Spinner::start(&self.message));
+        }
+    }
+
+    async fn print_output(
+        &mut self,
+        bytes: &[u8],
+        stream: OutputStream,
+    ) -> anyhow::Result<()> {
+        self.pause().await;
+        match stream {
+            OutputStream::Stdout => write_all(&mut std::io::stdout(), bytes)?,
+            OutputStream::Stderr => write_stderr_with_green_ticks(bytes)?,
+        }
+        self.resume().await;
+        Ok(())
+    }
+
+    async fn stop(mut self, done_message: Option<&str>) {
+        let elapsed = self.started_at.elapsed();
+        if elapsed < self.min_duration {
+            sleep(self.min_duration - elapsed).await;
+        }
+        if let Some(spinner) = self.spinner.take() {
+            spinner.stop(done_message).await;
+        } else if let Some(msg) = done_message {
+            eprintln!("{msg}");
+        }
+    }
+
+    async fn cancel(mut self) {
+        if let Some(spinner) = self.spinner.take() {
+            spinner.stop(None).await;
+        }
+    }
+}
+
 pub async fn handle_stream_events<S, F, Fut>(
     mut inbound: S,
     mut send_mfa: F,
@@ -96,7 +198,7 @@ where
                     write_all(&mut std::io::stdout(), &bytes)?;
                 }
                 stream_event::Event::Stderr(bytes) => {
-                    write_all(&mut std::io::stderr(), &bytes)?;
+                    write_stderr_with_green_ticks(&bytes)?;
                 }
                 stream_event::Event::ExitCode(code) => {
                     exit_code = Some(code);
@@ -111,18 +213,96 @@ where
                     }
                 }
                 stream_event::Event::Error(err) => {
-                    eprintln!("server error: {err}");
+                    eprintln!("{}", format_server_error(&err));
                     exit_code = Some(1);
                     break;
                 }
             },
             Ok(StreamEvent { event: None }) => log::info!("received empty event"),
             Err(status) => {
-                eprintln!("stream error: {}", status);
+                eprintln!("{}", format_status_error(&status));
                 exit_code = Some(1);
                 break;
             }
         }
+    }
+
+    Ok(exit_code)
+}
+
+pub async fn handle_stream_events_with_progress<S, F, Fut>(
+    mut inbound: S,
+    mut send_mfa: F,
+    message: &str,
+    min_duration: Duration,
+) -> anyhow::Result<Option<i32>>
+where
+    S: Stream<Item = Result<StreamEvent, Status>> + Unpin,
+    F: FnMut(MfaAnswer) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let mut exit_code: Option<i32> = None;
+    let mut cancel_spinner = false;
+    let mut spinner = ProgressSpinner::start(message, min_duration);
+    while let Some(item) = inbound.next().await {
+        match item {
+            Ok(StreamEvent { event: Some(ev) }) => match ev {
+                stream_event::Event::Stdout(bytes) => {
+                    if let Err(err) = spinner.print_output(&bytes, OutputStream::Stdout).await {
+                        spinner.cancel().await;
+                        return Err(err);
+                    }
+                }
+                stream_event::Event::Stderr(bytes) => {
+                    if let Err(err) = spinner.print_output(&bytes, OutputStream::Stderr).await {
+                        spinner.cancel().await;
+                        return Err(err);
+                    }
+                }
+                stream_event::Event::ExitCode(code) => {
+                    exit_code = Some(code);
+                    break;
+                }
+                stream_event::Event::Mfa(mfa) => {
+                    spinner.pause().await;
+                    let answers = match collect_mfa_answers(&mfa).await {
+                        Ok(v) => v,
+                        Err(err) => {
+                            spinner.cancel().await;
+                            return Err(err);
+                        }
+                    };
+                    if let Err(err) = send_mfa(answers).await {
+                        eprintln!("server closed while sending MFA answers: {err}");
+                        exit_code = Some(1);
+                        cancel_spinner = true;
+                        break;
+                    }
+                    spinner.resume().await;
+                }
+                stream_event::Event::Error(err) => {
+                    spinner.pause().await;
+                    eprintln!("{}", format_server_error(&err));
+                    exit_code = Some(1);
+                    cancel_spinner = true;
+                    break;
+                }
+            },
+            Ok(StreamEvent { event: None }) => log::info!("received empty event"),
+            Err(status) => {
+                spinner.pause().await;
+                eprintln!("{}", format_status_error(&status));
+                exit_code = Some(1);
+                cancel_spinner = true;
+                break;
+            }
+        }
+    }
+
+    if cancel_spinner {
+        spinner.cancel().await;
+    } else {
+        spinner.stop(None).await;
     }
 
     Ok(exit_code)
@@ -194,7 +374,7 @@ where
                     if let Some(spinner) = spinner.take() {
                         spinner.stop(None).await;
                     }
-                    eprintln!("server error: {err}");
+                    eprintln!("{}", format_server_error(&err));
                     exit_code = Some(1);
                     break;
                 }
@@ -241,7 +421,7 @@ where
                             if detail.is_empty() {
                                 eprintln!("failed");
                             } else {
-                                eprintln!("failed: {detail}");
+                                eprintln!("failed: {}", format_server_error(detail));
                             }
                             exit_code = Some(1);
                         }
@@ -258,7 +438,7 @@ where
                 if let Some(spinner) = spinner.take() {
                     spinner.stop(None).await;
                 }
-                eprintln!("stream error: {}", status);
+                eprintln!("{}", format_status_error(&status));
                 exit_code = Some(1);
                 break;
             }
@@ -276,6 +456,34 @@ pub fn ensure_exit_code(exit_code: Option<i32>, context: &str) -> anyhow::Result
     if let Some(num) = exit_code {
         if num != 0 {
             bail!("{context} {num}");
+        }
+    }
+    Ok(())
+}
+
+fn write_stderr_with_green_ticks(bytes: &[u8]) -> anyhow::Result<()> {
+    let mut stderr = std::io::stderr();
+    if !stderr.is_terminal() {
+        return write_all(&mut stderr, bytes);
+    }
+    let text = match std::str::from_utf8(bytes) {
+        Ok(v) => v,
+        Err(_) => return write_all(&mut stderr, bytes),
+    };
+    if !text.contains('✓') {
+        return write_all(&mut stderr, bytes);
+    }
+    for line in text.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix('✓') {
+            execute!(
+                stderr,
+                SetForegroundColor(Color::Green),
+                Print("✓"),
+                ResetColor,
+                Print(rest)
+            )?;
+        } else {
+            write_all(&mut stderr, line.as_bytes())?;
         }
     }
     Ok(())

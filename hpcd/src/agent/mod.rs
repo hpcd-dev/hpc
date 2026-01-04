@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Alex Sizykh
 
 mod add_cluster;
+mod error_codes;
 mod helpers;
 mod rpc;
 mod service;

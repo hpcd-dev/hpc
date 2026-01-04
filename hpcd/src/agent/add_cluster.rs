@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Alex Sizykh
 
 use crate::state::db::Address;
+use crate::agent::error_codes;
 use crate::util::net;
 use crate::util::remote_path::normalize_path;
 use proto::add_cluster_init;
@@ -12,7 +13,7 @@ use tonic::Status;
 pub fn parse_add_cluster_host(host: Option<add_cluster_init::Host>) -> Result<Address, Status> {
     let host = match host {
         Some(v) => v,
-        None => return Err(Status::invalid_argument("empty host in initial message")),
+        None => return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT)),
     };
     match host {
         add_cluster_init::Host::Hostname(v) => Ok(Address::Hostname(v)),
@@ -20,10 +21,8 @@ pub fn parse_add_cluster_host(host: Option<add_cluster_init::Host>) -> Result<Ad
             let ip: IpAddr = match addr.parse() {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err(Status::invalid_argument(format!(
-                        "could not parse {} into ip address: {:?}",
-                        addr, e
-                    )));
+                    log::debug!("could not parse ip address {}: {:?}", addr, e);
+                    return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
                 }
             };
             Ok(Address::Ip(ip))
@@ -36,9 +35,7 @@ pub fn parse_add_cluster_port(port: u32) -> Result<u16, Status> {
         Ok(v) => Ok(v),
         Err(e) => {
             log::debug!("could not case u32 port to u16 port: {}", e);
-            Err(Status::invalid_argument(format!(
-                "invalid port value: {port}"
-            )))
+            Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT))
         }
     }
 }
@@ -53,10 +50,7 @@ pub fn normalize_default_base_path(
     if normalized.is_absolute() {
         Ok(Some(normalized))
     } else {
-        Err(Status::invalid_argument(format!(
-            "default_base_path must be absolute, got: '{}'",
-            normalized.to_string_lossy()
-        )))
+        Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT))
     }
 }
 
@@ -73,13 +67,16 @@ pub async fn resolve_host_addr(addr: &Address, port: u16) -> Result<SocketAddr, 
 pub fn map_net_error(hostname: &str, err: net::NetError) -> Status {
     match err {
         net::NetError::DnsNotFound(_) => {
-            Status::invalid_argument(format!("hostname {hostname} could not be resolved"))
+            log::debug!("hostname {hostname} could not be resolved");
+            Status::invalid_argument(error_codes::NETWORK_ERROR)
         }
         net::NetError::NoAddrs(_) => {
-            Status::invalid_argument(format!("couldn't find any IP addresses for {hostname}"))
+            log::debug!("no IP addresses resolved for {hostname}");
+            Status::invalid_argument(error_codes::NETWORK_ERROR)
         }
         net::NetError::Resolve(h) => {
-            Status::internal(format!("encountered error when resolving {hostname}: {h}"))
+            log::debug!("error resolving hostname {hostname}: {h}");
+            Status::internal(error_codes::NETWORK_ERROR)
         }
     }
 }
@@ -108,17 +105,14 @@ mod tests {
             "not-an-ip".to_string(),
         )))
         .unwrap_err();
-        assert!(
-            err.message()
-                .contains("could not parse not-an-ip into ip address")
-        );
+        assert_eq!(err.message(), error_codes::INVALID_ARGUMENT);
     }
 
     #[test]
     fn parse_add_cluster_port_validates() {
         assert_eq!(parse_add_cluster_port(22).unwrap(), 22u16);
         let err = parse_add_cluster_port(u32::from(u16::MAX) + 1).unwrap_err();
-        assert_eq!(err.message(), "invalid port value: 65536");
+        assert_eq!(err.message(), error_codes::INVALID_ARGUMENT);
     }
 
     #[test]
@@ -127,7 +121,7 @@ mod tests {
         assert!(ok.unwrap().is_absolute());
 
         let err = normalize_default_base_path(Some("relative/path".to_string())).unwrap_err();
-        assert!(err.message().contains("default_base_path must be absolute"));
+        assert_eq!(err.message(), error_codes::INVALID_ARGUMENT);
     }
 
     #[test]
@@ -136,22 +130,16 @@ mod tests {
             "example.com",
             net::NetError::DnsNotFound("example.com".to_string()),
         );
-        assert_eq!(err.message(), "hostname example.com could not be resolved");
+        assert_eq!(err.message(), error_codes::NETWORK_ERROR);
 
         let err = map_net_error(
             "example.com",
             net::NetError::NoAddrs("example.com".to_string()),
         );
-        assert_eq!(
-            err.message(),
-            "couldn't find any IP addresses for example.com"
-        );
+        assert_eq!(err.message(), error_codes::NETWORK_ERROR);
 
         let io_err = std::io::Error::new(std::io::ErrorKind::Other, "boom");
         let err = map_net_error("example.com", net::NetError::Resolve(io_err));
-        assert!(
-            err.message()
-                .contains("encountered error when resolving example.com")
-        );
+        assert_eq!(err.message(), error_codes::NETWORK_ERROR);
     }
 }

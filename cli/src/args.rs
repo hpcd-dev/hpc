@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Alex Sizykh
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(name = "hpc", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -14,10 +14,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Check that the daemon is reachable.
     Ping,
-    Ls(LsArgs),
-    Submit(SubmitArgs),
+    /// Submit jobs, inspect status, and retrieve outputs.
     Job(JobArgs),
+    /// Add clusters and manage their configuration.
     Cluster(ClusterArgs),
 }
 
@@ -43,10 +44,14 @@ pub struct JobArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum JobCmd {
+    /// Submit a project to a cluster.
+    Submit(SubmitArgs),
     /// List jobs.
     List(ListJobsArgs),
     /// Show job details.
     Get(JobGetArgs),
+    /// List files in a job work directory.
+    Ls(JobLsArgs),
     /// Retrieve a file or directory from a job run folder.
     Retrieve(JobRetrieveArgs),
 }
@@ -81,6 +86,16 @@ pub struct JobRetrieveArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct JobLsArgs {
+    /// Job id from the daemon.
+    pub job_id: i64,
+    /// Path to list (absolute or relative to the job root).
+    pub path: Option<String>,
+    #[arg(long)]
+    pub cluster: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct ListClustersArgs {
     #[arg(long)]
     pub json: bool,
@@ -98,22 +113,33 @@ pub enum ClusterCmd {
     List(ListClustersArgs),
     /// Show cluster details.
     Get(ClusterGetArgs),
+    /// List files on a cluster.
+    Ls(ClusterLsArgs),
     /// Add a new cluster.
     Add(AddClusterArgs),
     /// Update cluster parameters.
     Set(SetClusterArgs),
+    /// Delete a cluster and its job records.
+    Delete(DeleteClusterArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct ClusterGetArgs {
-    pub hostid: String,
+    pub name: String,
     #[arg(long)]
     pub json: bool,
 }
 
 #[derive(Args, Debug)]
+pub struct ClusterLsArgs {
+    pub name: String,
+    /// Path to list (absolute or relative to the default base path).
+    pub path: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct SetClusterArgs {
-    pub hostid: String,
+    pub name: String,
 
     /// Use a remote IP address as input
     #[arg(long, value_name = "IP")]
@@ -130,14 +156,16 @@ pub struct SetClusterArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct LsArgs {
-    pub hostid: String,
-    pub path: Option<String>,
+pub struct DeleteClusterArgs {
+    pub name: String,
+    /// Skip the confirmation prompt.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct SubmitArgs {
-    pub hostid: String,
+    pub name: String,
     pub local_path: String,
     pub sbatchscript: Option<String>,
     #[arg(long)]
@@ -167,34 +195,14 @@ pub struct SubmitArgs {
 }
 
 #[derive(Args, Debug)]
-#[command(
-    group(
-        ArgGroup::new("addcluster")
-            .multiple(false)
-            .args(&["destination", "hostname", "ip"])
-    )
-)]
 pub struct AddClusterArgs {
-    /// Destination in ssh format: [user@]host[:port]
+    /// Destination in ssh format: user@host[:port] (required in headless mode)
     #[arg(value_name = "DESTINATION")]
     pub destination: Option<String>,
 
-    #[arg(long, value_name = "HOSTNAME")]
-    pub hostname: Option<String>,
-
-    /// Use a remote IP address as input
-    #[arg(long, value_name = "IP")]
-    pub ip: Option<String>,
-
+    /// Friendly cluster name you’ll use in other commands (e.g. "gpu01" or "lab-cluster").
     #[arg(long)]
-    pub username: Option<String>,
-
-    #[arg(long)]
-    pub hostid: Option<String>,
-
-    /// Defaults to 22.
-    #[arg(long)]
-    pub port: Option<u32>,
+    pub name: Option<String>,
 
     /// Defaults to ~/.ssh/id_ed25519.
     #[arg(long)]

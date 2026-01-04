@@ -10,12 +10,14 @@ use russh::keys::PrivateKeyWithHashAlg;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::ssh::AuthenticationFailure;
+
 use super::{ClientHandler, SessionManager};
 
 enum AuthDecision {
     Success,
     KeyboardInteractive,
-    Failure { msg: String },
+    Failure,
 }
 
 trait MfaEvent {
@@ -49,15 +51,7 @@ fn auth_decision(result: AuthResult) -> AuthDecision {
         {
             AuthDecision::KeyboardInteractive
         }
-        AuthResult::Failure {
-            remaining_methods,
-            partial_success,
-        } => AuthDecision::Failure {
-            msg: format!(
-                "authentication failure(remaining_methods={:?},partial_success={:?})",
-                remaining_methods, partial_success
-            ),
-        },
+        AuthResult::Failure { .. } => AuthDecision::Failure,
     }
 }
 
@@ -133,7 +127,7 @@ impl SessionManager {
                         self.do_keyboard_interactive(&mut handle, evt_tx, mfa_rx)
                             .await?;
                     }
-                    AuthDecision::Failure { msg } => return Err(anyhow!(msg)),
+                    AuthDecision::Failure => return Err(AuthenticationFailure.into()),
                 }
             } else {
                 // No key -> go straight to keyboard interactive
@@ -214,12 +208,12 @@ impl SessionManager {
                     remaining_methods,
                     partial_success,
                 } => {
-                    // Auth failed. Surface a clear error to client.
-                    let msg = format!(
+                    log::debug!(
                         "authentication failed (partial_success={}, remaining={:?})",
-                        partial_success, remaining_methods
+                        partial_success,
+                        remaining_methods
                     );
-                    return Err(anyhow!(msg));
+                    return Err(AuthenticationFailure.into());
                 }
                 KeyboardInteractiveAuthResponse::InfoRequest {
                     name,
@@ -286,9 +280,8 @@ mod tests {
             remaining_methods: MethodSet::from(methods.as_slice()),
             partial_success: false,
         });
-        let AuthDecision::Failure { msg } = decision else {
+        let AuthDecision::Failure = decision else {
             panic!("expected auth failure");
         };
-        assert!(msg.contains("authentication failure"));
     }
 }

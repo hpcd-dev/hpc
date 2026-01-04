@@ -36,16 +36,25 @@ impl SessionCache {
         }
     }
 
-    pub async fn get(&self, hostid: &str) -> Option<Arc<SessionManager>> {
-        self.sessions.read().await.get(hostid).cloned()
+    pub async fn get(&self, name: &str) -> Option<Arc<SessionManager>> {
+        self.sessions.read().await.get(name).cloned()
     }
 
-    pub async fn insert(&self, hostid: String, session: Arc<SessionManager>) {
-        self.sessions.write().await.insert(hostid, session);
+    pub async fn insert(&self, name: String, session: Arc<SessionManager>) {
+        self.sessions.write().await.insert(name, session);
     }
 
-    pub async fn is_connected(&self, hostid: &str) -> bool {
-        let Some(session) = self.get(hostid).await else {
+    pub async fn remove_and_shutdown(&self, name: &str) -> bool {
+        let session = self.sessions.write().await.remove(name);
+        if let Some(session) = session {
+            session.shutdown().await;
+            return true;
+        }
+        false
+    }
+
+    pub async fn is_connected(&self, name: &str) -> bool {
+        let Some(session) = self.get(name).await else {
             return false;
         };
         !session.needs_connect().await
@@ -53,14 +62,14 @@ impl SessionCache {
 
     pub async fn get_or_create(
         &self,
-        hostid: &str,
+        name: &str,
         host: &HostRecord,
     ) -> Result<Arc<SessionManager>, AgentSvcError> {
-        if let Some(existing) = self.get(hostid).await {
+        if let Some(existing) = self.get(name).await {
             return Ok(existing);
         }
 
-        let connection_addr = resolve_host_addr(&host.address, host.port, hostid).await?;
+        let connection_addr = resolve_host_addr(&host.address, host.port, name).await?;
         let ssh_params = SshParams {
             addr: connection_addr,
             username: host.username.clone(),
@@ -69,7 +78,7 @@ impl SessionCache {
             ki_submethods: None,
         };
         let session = self.factory.build(ssh_params);
-        self.insert(hostid.to_string(), session.clone()).await;
+        self.insert(name.to_string(), session.clone()).await;
         Ok(session)
     }
 }
@@ -77,13 +86,13 @@ impl SessionCache {
 async fn resolve_host_addr(
     address: &Address,
     port: u16,
-    hostid: &str,
+    name: &str,
 ) -> Result<SocketAddr, AgentSvcError> {
     match address {
         Address::Ip(addr) => Ok(SocketAddr::new(*addr, port)),
         Address::Hostname(hostname) => net::lookup_first_addr(hostname, port).await.map_err(|e| {
             AgentSvcError::NetworkError(format!(
-                "failed to lookup address for hostid {hostid} (hostname={hostname}): {e}",
+                "failed to lookup address for name {name} (hostname={hostname}): {e}",
             ))
         }),
     }
@@ -120,7 +129,7 @@ mod tests {
 
         let host = HostRecord {
             id: 1,
-            hostid: "host-a".to_string(),
+            name: "host-a".to_string(),
             username: "alice".to_string(),
             address: Address::Ip("127.0.0.1".parse().unwrap()),
             distro: crate::state::db::Distro {

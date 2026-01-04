@@ -7,6 +7,7 @@ use thiserror::Error as ThisError;
 use tokio_stream::Stream;
 use tonic::Status;
 
+
 pub type OutStream =
     Pin<Box<dyn Stream<Item = Result<StreamEvent, Status>> + Send + Sync + 'static>>;
 pub type SubmitOutStream =
@@ -14,8 +15,8 @@ pub type SubmitOutStream =
 
 #[derive(Debug, PartialEq, Eq, ThisError)]
 pub enum AgentSvcError {
-    #[error("unknown hostid")]
-    UnknownHostId,
+    #[error("unknown name")]
+    UnknownName,
 
     #[error("network error: {0}")]
     NetworkError(String),
