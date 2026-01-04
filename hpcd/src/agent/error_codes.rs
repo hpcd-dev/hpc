@@ -15,7 +15,6 @@ pub const INTERNAL_ERROR: &str = "internal_error";
 pub const CANCELED: &str = "canceled";
 pub const REMOTE_ERROR: &str = "remote_error";
 pub const LOCAL_ERROR: &str = "local_error";
-pub const PERMISSION_DENIED: &str = "permission_denied";
 
 pub fn code_for_ssh_error(err: &Error) -> &'static str {
     if is_auth_failure(err) {

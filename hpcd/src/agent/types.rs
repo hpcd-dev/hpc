@@ -7,7 +7,6 @@ use thiserror::Error as ThisError;
 use tokio_stream::Stream;
 use tonic::Status;
 
-use crate::agent::error_codes;
 
 pub type OutStream =
     Pin<Box<dyn Stream<Item = Result<StreamEvent, Status>> + Send + Sync + 'static>>;
@@ -24,14 +23,4 @@ pub enum AgentSvcError {
 
     #[error("database error: {error}")]
     DatabaseError { error: String },
-}
-
-impl AgentSvcError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            AgentSvcError::UnknownName => error_codes::NOT_FOUND,
-            AgentSvcError::NetworkError(_) => error_codes::NETWORK_ERROR,
-            AgentSvcError::DatabaseError { .. } => error_codes::INTERNAL_ERROR,
-        }
-    }
 }

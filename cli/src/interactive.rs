@@ -193,6 +193,7 @@ pub fn resolve_add_cluster_args(args: AddClusterArgs) -> anyhow::Result<Resolved
     })
 }
 
+#[derive(Debug)]
 struct ParsedDestination {
     username: Option<String>,
     host: String,
@@ -454,7 +455,6 @@ fn prompt_line_with_default(
 
 struct PromptLineResult {
     input: String,
-    used_default: bool,
 }
 
 fn prompt_line_with_default_result(
@@ -467,14 +467,11 @@ fn prompt_line_with_default_result(
     execute!(stdout, cursor::MoveToColumn(0))?;
     let mut editor = LineEditor::new(prompt, 0, hint, default);
     editor.render(&mut stdout)?;
-    let mut used_default = false;
-
     loop {
         match event::read()? {
             Event::Key(key) => match key.code {
                 KeyCode::Enter => {
                     if editor.apply_default_if_empty() {
-                        used_default = true;
                         editor.render(&mut stdout)?;
                     }
                     execute!(stdout, ResetColor, Print("\r\n"))?;
@@ -520,7 +517,6 @@ fn prompt_line_with_default_result(
 
     Ok(PromptLineResult {
         input: editor.into_string(),
-        used_default,
     })
 }
 
@@ -728,7 +724,13 @@ mod tests {
 
     #[test]
     fn resolve_add_cluster_headless_destination_reachable() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                return;
+            }
+            Err(err) => panic!("failed to bind listener: {err}"),
+        };
         let port = listener.local_addr().unwrap().port();
         let args = AddClusterArgs {
             destination: Some(format!("alex@127.0.0.1:{port}")),

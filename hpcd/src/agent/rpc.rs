@@ -261,8 +261,12 @@ impl Agent for AgentSvc {
             })?
             .ok_or_else(|| Status::invalid_argument(error_codes::INVALID_ARGUMENT))?;
 
-        let (name, path) = match init.msg {
-            Some(proto::ls_request::Msg::Init(LsRequestInit { name, path })) => (name, path),
+        let (name, path, job_id) = match init.msg {
+            Some(proto::ls_request::Msg::Init(LsRequestInit {
+                name,
+                path,
+                job_id,
+            })) => (name, path, job_id),
             _ => {
                 return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
             }
@@ -279,25 +283,62 @@ impl Agent for AgentSvc {
             }
         });
 
-        let list_path = match path {
-            Some(v) => {
-                if v.is_empty() {
-                    return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
+        let (name, list_path) = if let Some(job_id) = job_id {
+            let job = match self.hosts().get_job_by_job_id(job_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return Err(Status::invalid_argument(error_codes::NOT_FOUND));
                 }
-                if PathBuf::from(&v).is_absolute() {
-                    normalize_path(v).to_string_lossy().into_owned()
-                } else {
-                    let default_base_path =
-                        get_default_base_path(self.hosts().as_ref(), &name).await?;
-                    let base_path = PathBuf::from(default_base_path);
-                    util::remote_path::resolve_relative(base_path, v)
-                        .to_string_lossy()
-                        .into_owned()
+                Err(e) => {
+                    log::debug!("could not fetch job id {job_id}: {e}");
+                    return Err(Status::internal(error_codes::INTERNAL_ERROR));
                 }
+            };
+            if !name.is_empty() && name != job.name {
+                return Err(Status::invalid_argument(error_codes::NOT_FOUND));
             }
-            None => normalize_path(get_default_base_path(self.hosts().as_ref(), &name).await?)
-                .to_string_lossy()
-                .into_owned(),
+            let (job_name, run_path) = (job.name, job.remote_path);
+            let list_path = match path {
+                Some(v) => {
+                    if v.is_empty() {
+                        return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
+                    }
+                    if PathBuf::from(&v).is_absolute() {
+                        normalize_path(v).to_string_lossy().into_owned()
+                    } else {
+                        util::remote_path::resolve_relative(&run_path, v)
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                }
+                None => normalize_path(&run_path).to_string_lossy().into_owned(),
+            };
+            (job_name, list_path)
+        } else {
+            if name.is_empty() {
+                return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
+            }
+            let list_path = match path {
+                Some(v) => {
+                    if v.is_empty() {
+                        return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
+                    }
+                    if PathBuf::from(&v).is_absolute() {
+                        normalize_path(v).to_string_lossy().into_owned()
+                    } else {
+                        let default_base_path =
+                            get_default_base_path(self.hosts().as_ref(), &name).await?;
+                        let base_path = PathBuf::from(default_base_path);
+                        util::remote_path::resolve_relative(base_path, v)
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                }
+                None => normalize_path(get_default_base_path(self.hosts().as_ref(), &name).await?)
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            (name, list_path)
         };
 
         let command = format!("ls -- {}", sh_escape(&list_path));

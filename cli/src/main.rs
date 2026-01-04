@@ -3,10 +3,10 @@
 
 use anyhow::bail;
 use clap::{CommandFactory, FromArgMatches};
-use cli::args::{Cli, ClusterCmd, Cmd, JobCmd, SubmitArgs};
+use cli::args::{Cli, ClusterCmd, Cmd, JobCmd};
 use cli::client::{
-    fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_delete_cluster, send_job_retrieve,
-    send_ls, send_ping, send_resolve_home_dir, send_submit,
+    fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_delete_cluster, send_job_ls,
+    send_job_retrieve, send_ls, send_ping, send_resolve_home_dir, send_submit,
 };
 use cli::filters::submit_filters_from_matches;
 use cli::format::{
@@ -59,39 +59,30 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => bail!(e),
             }
         }
-        Cmd::Ls(args) => {
-            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
-            send_ls(&mut client, &args.name, &args.path).await?
-        }
-        Cmd::Submit(SubmitArgs {
-            name,
-            local_path,
-            remote_path,
-            sbatchscript,
-            headless,
-            ..
-        }) => {
-            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
-            let local_path_buf = PathBuf::from(&local_path);
-            println!("Submitting job...");
-            println!("name: {name}");
-            let _ = std::io::stdout().flush();
-            let sbatchscript =
-                resolve_sbatch_script(&local_path_buf, sbatchscript.as_deref(), headless)?;
-            println!("selected sbatch script: {sbatchscript}");
-            send_submit(
-                &mut client,
-                &name,
-                &local_path,
-                &remote_path,
-                &sbatchscript,
-                &submit_filters,
-            )
-            .await?
-        }
         Cmd::Job(job_args) => {
             let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
             match job_args.cmd {
+                JobCmd::Submit(args) => {
+                    let local_path_buf = PathBuf::from(&args.local_path);
+                    println!("Submitting job...");
+                    println!("name: {}", args.name);
+                    let _ = std::io::stdout().flush();
+                    let sbatchscript = resolve_sbatch_script(
+                        &local_path_buf,
+                        args.sbatchscript.as_deref(),
+                        args.headless,
+                    )?;
+                    println!("selected sbatch script: {sbatchscript}");
+                    send_submit(
+                        &mut client,
+                        &args.name,
+                        &args.local_path,
+                        &args.remote_path,
+                        &sbatchscript,
+                        &submit_filters,
+                    )
+                    .await?
+                }
                 JobCmd::List(args) => {
                     let response = fetch_list_jobs(&mut client, args.cluster).await?;
                     if args.json {
@@ -134,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                JobCmd::Ls(args) => {
+                    send_job_ls(&mut client, args.job_id, &args.path, &args.cluster).await?
+                }
                 JobCmd::Retrieve(args) => {
                     send_job_retrieve(
                         &mut client,
@@ -173,6 +167,9 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         print!("{}", format_cluster_details(cluster));
                     }
+                }
+                ClusterCmd::Ls(args) => {
+                    send_ls(&mut client, &args.name, &args.path).await?
                 }
                 ClusterCmd::Add(args) => {
                     println!("Adding new cluster...");

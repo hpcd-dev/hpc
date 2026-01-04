@@ -109,18 +109,20 @@ pub async fn send_delete_cluster(
     Ok(response)
 }
 
-pub async fn send_ls(
+async fn send_ls_request(
     client: &mut AgentClient<Channel>,
-    name: &str,
-    path: &Option<String>,
+    name: String,
+    job_id: Option<i64>,
+    path: Option<String>,
 ) -> anyhow::Result<()> {
     let (tx_ans, rx_ans) = mpsc::channel::<LsRequest>(16);
     let outbound = ReceiverStream::new(rx_ans);
     tx_ans
         .send(LsRequest {
             msg: Some(proto::ls_request::Msg::Init(LsRequestInit {
-                name: name.to_owned(),
-                path: path.to_owned(),
+                name,
+                path,
+                job_id,
             })),
         })
         .await?;
@@ -144,6 +146,24 @@ pub async fn send_ls(
     })
     .await?;
     ensure_exit_code(exit_code, "received exit code")
+}
+
+pub async fn send_ls(
+    client: &mut AgentClient<Channel>,
+    name: &str,
+    path: &Option<String>,
+) -> anyhow::Result<()> {
+    send_ls_request(client, name.to_owned(), None, path.to_owned()).await
+}
+
+pub async fn send_job_ls(
+    client: &mut AgentClient<Channel>,
+    job_id: i64,
+    path: &Option<String>,
+    cluster: &Option<String>,
+) -> anyhow::Result<()> {
+    let name = cluster.clone().unwrap_or_default();
+    send_ls_request(client, name, Some(job_id), path.to_owned()).await
 }
 
 pub async fn send_job_retrieve(

@@ -26,7 +26,7 @@ Submitting jobs to an HPC cluster usually means repeatedly doing the same glue w
 - Local daemon (`hpcd`) stores cluster + job metadata in SQLite.
 - CLI (`hpc`) talks to the daemon over gRPC on `127.0.0.1:50056`.
 - Add/update/list clusters: `hpc cluster add/set/get/list`.
-- Submit a directory with ordered include/exclude filters.
+- Submit a directory with ordered include/exclude filters: `hpc job submit`.
 - `.sbatch` discovery (auto / interactive picker / explicit path).
 - Streams stdout/stderr and forwards keyboard-interactive/MFA prompts.
 - Track jobs and retrieve artifacts: `hpc job list/get/retrieve`.

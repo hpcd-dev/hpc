@@ -68,8 +68,9 @@ message SubmitStreamEvent {
 }
 
 message LsRequestInit {
-  string name = 1;       // cluster name
-  optional string path = 2; // path to list (absolute or relative to default_base_path)
+  string name = 1;          // cluster name (optional if job_id is set)
+  optional string path = 2; // path to list (absolute or relative to base path)
+  optional int64 job_id = 3; // job id to list from (uses job's cluster)
 }
 
 // Client -> Server

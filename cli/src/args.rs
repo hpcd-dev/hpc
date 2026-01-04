@@ -16,11 +16,7 @@ pub struct Cli {
 pub enum Cmd {
     /// Check that the daemon is reachable.
     Ping,
-    /// List files on a cluster.
-    Ls(LsArgs),
-    /// Submit a project to a cluster.
-    Submit(SubmitArgs),
-    /// Inspect jobs and retrieve outputs.
+    /// Submit jobs, inspect status, and retrieve outputs.
     Job(JobArgs),
     /// Add clusters and manage their configuration.
     Cluster(ClusterArgs),
@@ -48,10 +44,14 @@ pub struct JobArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum JobCmd {
+    /// Submit a project to a cluster.
+    Submit(SubmitArgs),
     /// List jobs.
     List(ListJobsArgs),
     /// Show job details.
     Get(JobGetArgs),
+    /// List files in a job work directory.
+    Ls(JobLsArgs),
     /// Retrieve a file or directory from a job run folder.
     Retrieve(JobRetrieveArgs),
 }
@@ -86,6 +86,16 @@ pub struct JobRetrieveArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct JobLsArgs {
+    /// Job id from the daemon.
+    pub job_id: i64,
+    /// Path to list (absolute or relative to the job root).
+    pub path: Option<String>,
+    #[arg(long)]
+    pub cluster: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct ListClustersArgs {
     #[arg(long)]
     pub json: bool,
@@ -103,6 +113,8 @@ pub enum ClusterCmd {
     List(ListClustersArgs),
     /// Show cluster details.
     Get(ClusterGetArgs),
+    /// List files on a cluster.
+    Ls(ClusterLsArgs),
     /// Add a new cluster.
     Add(AddClusterArgs),
     /// Update cluster parameters.
@@ -116,6 +128,13 @@ pub struct ClusterGetArgs {
     pub name: String,
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ClusterLsArgs {
+    pub name: String,
+    /// Path to list (absolute or relative to the default base path).
+    pub path: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -142,12 +161,6 @@ pub struct DeleteClusterArgs {
     /// Skip the confirmation prompt.
     #[arg(long, short = 'y')]
     pub yes: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct LsArgs {
-    pub name: String,
-    pub path: Option<String>,
 }
 
 #[derive(Args, Debug)]
