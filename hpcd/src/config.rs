@@ -17,12 +17,14 @@ const DEFAULT_JOB_CHECK_INTERVAL_SECS: u64 = 5;
 struct FileConfig {
     database_path: Option<String>,
     job_check_interval_secs: Option<u64>,
+    verbose: Option<bool>,
 }
 
 #[derive(Debug)]
 pub struct Config {
     pub database_path: PathBuf,
     pub job_check_interval_secs: u64,
+    pub verbose: bool,
     pub config_path: Option<PathBuf>,
 }
 
@@ -30,6 +32,7 @@ pub struct Config {
 pub struct Overrides {
     pub database_path: Option<PathBuf>,
     pub job_check_interval_secs: Option<u64>,
+    pub verbose: Option<bool>,
 }
 
 pub fn load(config_path_override: Option<PathBuf>, overrides: Overrides) -> Result<Config> {
@@ -57,12 +60,15 @@ pub fn load(config_path_override: Option<PathBuf>, overrides: Overrides) -> Resu
         },
     };
 
+    let verbose = overrides.verbose.or(file_config.verbose).unwrap_or(false);
+
     Ok(Config {
         database_path,
         job_check_interval_secs: overrides
             .job_check_interval_secs
             .or(file_config.job_check_interval_secs)
             .unwrap_or(DEFAULT_JOB_CHECK_INTERVAL_SECS),
+        verbose,
         config_path,
     })
 }
@@ -187,6 +193,7 @@ mod tests {
             Overrides {
                 database_path: Some(PathBuf::from("from_flag.sqlite")),
                 job_check_interval_secs: Some(2),
+                verbose: None,
             },
         )
         .unwrap();
@@ -212,6 +219,7 @@ mod tests {
             Overrides {
                 database_path: None,
                 job_check_interval_secs: Some(2),
+                verbose: None,
             },
         )
         .unwrap();
@@ -236,6 +244,47 @@ mod tests {
             config.job_check_interval_secs,
             DEFAULT_JOB_CHECK_INTERVAL_SECS
         );
+    }
+
+    #[test]
+    fn reads_verbose_from_config() {
+        let dir = TempDir::new().unwrap();
+        let config_dir = dir.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("hpcd.toml");
+        fs::write(
+            &config_path,
+            "database_path = \"db/hpcd.sqlite\"\nverbose = true\n",
+        )
+        .unwrap();
+
+        let config = load(Some(config_path), Overrides::default()).unwrap();
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn verbose_override_takes_precedence() {
+        let dir = TempDir::new().unwrap();
+        let config_dir = dir.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("hpcd.toml");
+        fs::write(
+            &config_path,
+            "database_path = \"db/hpcd.sqlite\"\nverbose = false\n",
+        )
+        .unwrap();
+
+        let config = load(
+            Some(config_path),
+            Overrides {
+                database_path: None,
+                job_check_interval_secs: None,
+                verbose: Some(true),
+            },
+        )
+        .unwrap();
+
+        assert!(config.verbose);
     }
 
     #[test]

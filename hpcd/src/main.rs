@@ -46,6 +46,13 @@ struct Opts {
         help = "How often to check remote job states. Overrides `job_check_interval_secs` from the config file."
     )]
     job_check_interval_secs: Option<u64>,
+    #[arg(
+        short,
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Enable debug logging and include logs from dependencies. Overrides `verbose` from the config file."
+    )]
+    verbose: bool,
 }
 
 const HELP_TEMPLATE: &str = r#"██╗  ██╗██████╗  ██████╗
@@ -70,23 +77,39 @@ fn apply_help_template_recursively(cmd: &mut clap::Command) {
     *cmd = owned;
 }
 
+fn init_logging(verbose: bool) {
+    let mut builder = env_logger::builder();
+    builder.format_timestamp_secs();
+    if verbose {
+        builder.filter_level(LevelFilter::Debug);
+    } else {
+        builder
+            .filter_level(LevelFilter::Off)
+            .filter_module("hpcd", LevelFilter::Info);
+    }
+    builder.init();
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::builder()
-        .filter_level(LevelFilter::Debug)
-        .init();
-
     let mut cmd = Opts::command();
     apply_help_template_recursively(&mut cmd);
     let matches = cmd.get_matches();
+    let verbose_override = if matches.get_flag("verbose") {
+        Some(true)
+    } else {
+        None
+    };
     let opts = Opts::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     let config = config::load(
         opts.config,
         config::Overrides {
             database_path: opts.database_path,
             job_check_interval_secs: opts.job_check_interval_secs,
+            verbose: verbose_override,
         },
     )?;
+    init_logging(config.verbose);
     log::debug!("config path: {:?}", config.config_path);
     config::ensure_database_dir(&config.database_path)?;
     let db = state::db::HostStore::open(&config.database_path).await?;
@@ -94,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
 
     let svc = agent::AgentSvc::new(db);
     svc.spawn_job_checker(Duration::from_secs(config.job_check_interval_secs));
-    println!("server listening on {}", server_addr);
+    log::info!("server listening on {}", server_addr);
     Server::builder()
         .add_service(AgentServer::new(svc))
         .serve(server_addr)
