@@ -8,6 +8,7 @@ use cli::client::{
     fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_delete_cluster, send_job_ls,
     send_job_retrieve, send_ls, send_ping, send_resolve_home_dir, send_submit,
 };
+use cli::config;
 use cli::filters::submit_filters_from_matches;
 use cli::format::{
     cluster_host_string, format_cluster_details, format_cluster_details_json, format_clusters_json,
@@ -52,16 +53,17 @@ async fn main() -> anyhow::Result<()> {
     let matches = cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     let submit_filters = submit_filters_from_matches(&matches);
+    let daemon_endpoint = config::daemon_endpoint(cli.config.clone())?;
     match cli.cmd {
         Cmd::Ping => {
-            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
+            let mut client = AgentClient::connect(daemon_endpoint.clone()).await?;
             match send_ping(&mut client).await {
                 Ok(()) => println!("pong"),
                 Err(e) => bail!(e),
             }
         }
         Cmd::Job(job_args) => {
-            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
+            let mut client = AgentClient::connect(daemon_endpoint.clone()).await?;
             match job_args.cmd {
                 JobCmd::Submit(args) => {
                     let local_path_buf = PathBuf::from(&args.local_path);
@@ -153,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Cluster(cluster_args) => {
-            let mut client = AgentClient::connect("http://127.0.0.1:50056").await?;
+            let mut client = AgentClient::connect(daemon_endpoint.clone()).await?;
             match cluster_args.cmd {
                 ClusterCmd::List(args) => {
                     let response = fetch_list_clusters(&mut client, "").await?;

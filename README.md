@@ -24,7 +24,7 @@ Submitting jobs to an HPC cluster usually means repeatedly doing the same glue w
 ## Features
 
 - Local daemon (`hpcd`) stores cluster + job metadata in SQLite.
-- CLI (`hpc`) talks to the daemon over gRPC on `127.0.0.1:50056`.
+- CLI (`hpc`) talks to the daemon over gRPC on `127.0.0.1:50056` (configurable via `port` in `hpc.toml` or `--config`).
 - Add/update/list clusters: `hpc cluster add/set/get/list`.
 - Cluster destinations use `user@host[:port]` (e.g. `hpc cluster add alice@gpu01:2222`).
 - Submit a directory with ordered include/exclude filters: `hpc job submit`.
@@ -44,8 +44,8 @@ brew services start hpc
 
 This installs both `hpc` (CLI) and `hpcd` (daemon). `brew services` runs the `hpcd` daemon for your user. Edit the config file in the standard config directory before starting:
 
-- macOS: `~/Library/Application Support/hpcd/hpcd.toml`
-- Linux: `~/.config/hpcd/hpcd.toml`
+- macOS: `~/Library/Application Support/hpc/hpc.toml`
+- Linux: `~/.config/hpc/hpc.toml`
 
 ### Build from source
 

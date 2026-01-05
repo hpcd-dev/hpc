@@ -8,6 +8,13 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "hpc", version, about, long_about = None)]
 pub struct Cli {
+    #[arg(
+        short,
+        long,
+        value_name = "PATH",
+        help = "Path to a TOML config file. When omitted, hpc uses the default config file location if available."
+    )]
+    pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub cmd: Cmd,
 }

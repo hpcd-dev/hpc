@@ -4,7 +4,10 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use log::LevelFilter;
 use proto::agent_server::AgentServer;
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+};
 use tokio::time::Duration;
 use tonic::transport::Server;
 
@@ -53,6 +56,12 @@ struct Opts {
         help = "Enable debug logging and include logs from dependencies. Overrides `verbose` from the config file."
     )]
     verbose: bool,
+    #[arg(
+        long,
+        value_name = "PORT",
+        help = "Port to bind the daemon on. Overrides `port` from the config file."
+    )]
+    port: Option<u16>,
 }
 
 const HELP_TEMPLATE: &str = r#"██╗  ██╗██████╗  ██████╗
@@ -106,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         config::Overrides {
             database_path: opts.database_path,
             job_check_interval_secs: opts.job_check_interval_secs,
+            port: opts.port,
             verbose: verbose_override,
         },
     )?;
@@ -113,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     log::debug!("config path: {:?}", config.config_path);
     config::ensure_database_dir(&config.database_path)?;
     let db = state::db::HostStore::open(&config.database_path).await?;
-    let server_addr: SocketAddr = "127.0.0.1:50056".parse()?;
+    let server_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
 
     let svc = agent::AgentSvc::new(db);
     svc.spawn_job_checker(Duration::from_secs(config.job_check_interval_secs));

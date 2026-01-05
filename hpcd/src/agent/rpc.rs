@@ -164,14 +164,14 @@ impl Agent for AgentSvc {
         let req = request.into_inner();
         match req.message.trim() {
             "ping" => {
-                log::info!("audit: ping remote_addr={remote_addr}");
+                log::info!("ping remote_addr={remote_addr}");
                 Ok(tonic::Response::new(PingReply {
                     message: "pong".into(),
                 }))
             }
             m => {
                 log::warn!(
-                    "audit: ping rejected remote_addr={remote_addr} message={m}"
+                    "ping rejected remote_addr={remote_addr} message={m}"
                 );
                 Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT))
             }
@@ -217,7 +217,7 @@ impl Agent for AgentSvc {
         let session_name_label = session_name.as_deref().unwrap_or("<none>");
         let host_label = format_address(&addr);
         log::info!(
-            "audit: resolve_home_dir start remote_addr={remote_addr} session_name={session_name_label} username={username} host={host_label} port={port}"
+            "resolve_home_dir start remote_addr={remote_addr} session_name={session_name_label} username={username} host={host_label} port={port}"
         );
 
         let ssh_params = crate::ssh::SshParams {
@@ -252,7 +252,7 @@ impl Agent for AgentSvc {
             let sm = Arc::new(crate::ssh::SessionManager::new(ssh_params));
             if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
                 log::warn!(
-                    "audit: resolve_home_dir failed remote_addr={audit_remote_addr} target={audit_target} session_name={audit_session_name} error={e}"
+                    "resolve_home_dir failed remote_addr={audit_remote_addr} target={audit_target} session_name={audit_session_name} error={e}"
                 );
                 log::debug!("failed to connect to {target}: {e}");
                 let code = error_codes::code_for_ssh_error(&e);
@@ -266,7 +266,7 @@ impl Agent for AgentSvc {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "audit: resolve_home_dir failed remote_addr={audit_remote_addr} target={audit_target} session_name={audit_session_name} error_code={:?}",
+                        "resolve_home_dir failed remote_addr={audit_remote_addr} target={audit_target} session_name={audit_session_name} error_code={:?}",
                         e.code()
                     );
                     let _ = evt_tx.send(Err(e)).await;
@@ -277,7 +277,7 @@ impl Agent for AgentSvc {
                 sessions.insert(name, sm.clone()).await;
             }
             log::info!(
-                "audit: resolve_home_dir completed remote_addr={audit_remote_addr} target={audit_target} session_name={audit_session_name} home={home}"
+                "resolve_home_dir completed remote_addr={audit_remote_addr} target={audit_target} session_name={audit_session_name} home={home}"
             );
             let _ = evt_tx
                 .send(Ok(StreamEvent {
@@ -326,7 +326,7 @@ impl Agent for AgentSvc {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "<none>".to_string());
         log::info!(
-            "audit: ls start remote_addr={remote_addr} name={name} job_id={job_id_label} requested_path={requested_path_label}"
+            "ls start remote_addr={remote_addr} name={name} job_id={job_id_label} requested_path={requested_path_label}"
         );
 
         let (mfa_tx, mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(16);
@@ -345,13 +345,13 @@ impl Agent for AgentSvc {
                 Ok(Some(v)) => v,
                 Ok(None) => {
                     log::warn!(
-                        "audit: ls failed remote_addr={remote_addr} job_id={job_id_label} reason=job_not_found"
+                        "ls failed remote_addr={remote_addr} job_id={job_id_label} reason=job_not_found"
                     );
                     return Err(Status::invalid_argument(error_codes::NOT_FOUND));
                 }
                 Err(e) => {
                     log::warn!(
-                        "audit: ls failed remote_addr={remote_addr} job_id={job_id_label} reason=db_error"
+                        "ls failed remote_addr={remote_addr} job_id={job_id_label} reason=db_error"
                     );
                     log::debug!("could not fetch job id {job_id}: {e}");
                     return Err(Status::internal(error_codes::INTERNAL_ERROR));
@@ -359,7 +359,7 @@ impl Agent for AgentSvc {
             };
             if !name.is_empty() && name != job.name {
                 log::warn!(
-                    "audit: ls failed remote_addr={remote_addr} job_id={job_id_label} name={name} reason=name_mismatch"
+                    "ls failed remote_addr={remote_addr} job_id={job_id_label} name={name} reason=name_mismatch"
                 );
                 return Err(Status::invalid_argument(error_codes::NOT_FOUND));
             }
@@ -368,7 +368,7 @@ impl Agent for AgentSvc {
                 Some(v) => {
                     if v.is_empty() {
                         log::warn!(
-                            "audit: ls failed remote_addr={remote_addr} job_id={job_id_label} reason=empty_path"
+                            "ls failed remote_addr={remote_addr} job_id={job_id_label} reason=empty_path"
                         );
                         return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
                     }
@@ -386,7 +386,7 @@ impl Agent for AgentSvc {
         } else {
             if name.is_empty() {
                 log::warn!(
-                    "audit: ls failed remote_addr={remote_addr} reason=empty_name"
+                    "ls failed remote_addr={remote_addr} reason=empty_name"
                 );
                 return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
             }
@@ -394,7 +394,7 @@ impl Agent for AgentSvc {
                 Some(v) => {
                     if v.is_empty() {
                         log::warn!(
-                            "audit: ls failed remote_addr={remote_addr} name={name} reason=empty_path"
+                            "ls failed remote_addr={remote_addr} name={name} reason=empty_path"
                         );
                         return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
                     }
@@ -417,7 +417,7 @@ impl Agent for AgentSvc {
         };
 
         log::info!(
-            "audit: ls resolved remote_addr={remote_addr} name={name} list_path={list_path}"
+            "ls resolved remote_addr={remote_addr} name={name} list_path={list_path}"
         );
         let command = format!("ls -- {}", sh_escape(&list_path));
         self.run_command(command, &name, mfa_rx).await
@@ -453,12 +453,12 @@ impl Agent for AgentSvc {
         let name_label = name.as_deref().unwrap_or("<none>");
         let local_path_label = local_path.as_deref().unwrap_or("<none>");
         log::info!(
-            "audit: retrieve_job start remote_addr={remote_addr} job_id={job_id} name={name_label} path={path} local_path={local_path_label}"
+            "retrieve_job start remote_addr={remote_addr} job_id={job_id} name={name_label} path={path} local_path={local_path_label}"
         );
 
         if path.trim().is_empty() {
             log::warn!(
-                "audit: retrieve_job failed remote_addr={remote_addr} job_id={job_id} reason=empty_path"
+                "retrieve_job failed remote_addr={remote_addr} job_id={job_id} reason=empty_path"
             );
             return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
         }
@@ -466,7 +466,7 @@ impl Agent for AgentSvc {
             Some(v) if !v.trim().is_empty() => v,
             _ => {
                 log::warn!(
-                    "audit: retrieve_job failed remote_addr={remote_addr} job_id={job_id} reason=empty_local_path"
+                    "retrieve_job failed remote_addr={remote_addr} job_id={job_id} reason=empty_local_path"
                 );
                 return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
             }
@@ -495,7 +495,7 @@ impl Agent for AgentSvc {
                     Ok(Some(v)) => v,
                     Ok(None) => {
                         log::warn!(
-                            "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} reason=job_not_found"
+                            "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} reason=job_not_found"
                         );
                         let _ = evt_tx
                             .send(Ok(StreamEvent {
@@ -508,7 +508,7 @@ impl Agent for AgentSvc {
                     }
                     Err(e) => {
                         log::warn!(
-                            "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} reason=db_error"
+                            "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} reason=db_error"
                         );
                         log::debug!("could not fetch job id {job_id}: {e}");
                         let _ = evt_tx
@@ -525,7 +525,7 @@ impl Agent for AgentSvc {
                     && expected != job.name
                 {
                     log::warn!(
-                        "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={expected} reason=name_mismatch"
+                        "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={expected} reason=name_mismatch"
                     );
                     let _ = evt_tx
                         .send(Ok(StreamEvent {
@@ -543,7 +543,7 @@ impl Agent for AgentSvc {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=session_unavailable"
+                        "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=session_unavailable"
                     );
                     let message = match e {
                         AgentSvcError::UnknownName => error_codes::NOT_FOUND,
@@ -567,7 +567,7 @@ impl Agent for AgentSvc {
 
             if let Err(err) = mgr.ensure_connected(&evt_tx, &mut mfa_rx).await {
                 log::warn!(
-                    "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=connect_failed error={err}"
+                    "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=connect_failed error={err}"
                 );
                 log::debug!("failed to connect for retrieve job on {name}: {err}");
                 let _ = evt_tx
@@ -594,7 +594,7 @@ impl Agent for AgentSvc {
                     Ok(cwd) => local_base = cwd.join(local_base),
                     Err(e) => {
                         log::warn!(
-                            "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=local_path_resolve_failed error={e}"
+                            "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=local_path_resolve_failed error={e}"
                         );
                         log::debug!("could not resolve local destination: {e}");
                         let _ = evt_tx
@@ -612,7 +612,7 @@ impl Agent for AgentSvc {
             let local_target = if path_is_absolute {
                 let Some(name) = std::path::Path::new(&remote_path).file_name() else {
                     log::warn!(
-                        "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=invalid_remote_path"
+                        "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=invalid_remote_path"
                     );
                     let _ = evt_tx
                         .send(Ok(StreamEvent {
@@ -630,7 +630,7 @@ impl Agent for AgentSvc {
 
             if let Err(err) = mgr.retrieve_path(&remote_path, &local_target).await {
                 log::warn!(
-                    "audit: retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=remote_retrieve_failed error={err}"
+                    "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=remote_retrieve_failed error={err}"
                 );
                 log::debug!("retrieve path failed: {err}");
                 let _ = evt_tx
@@ -644,7 +644,7 @@ impl Agent for AgentSvc {
             }
 
             log::info!(
-                "audit: retrieve_job completed remote_addr={audit_remote_addr} job_id={job_id} name={name} remote_path={remote_path} local_target={}",
+                "retrieve_job completed remote_addr={audit_remote_addr} job_id={job_id} name={name} remote_path={remote_path} local_target={}",
                 local_target.to_string_lossy()
             );
             let _ = evt_tx
@@ -689,7 +689,7 @@ impl Agent for AgentSvc {
         }
         let connected_count = clusters.iter().filter(|cluster| cluster.connected).count();
         log::info!(
-            "audit: list_clusters remote_addr={remote_addr} count={} connected={connected_count}",
+            "list_clusters remote_addr={remote_addr} count={} connected={connected_count}",
             clusters.len()
         );
 
@@ -704,11 +704,11 @@ impl Agent for AgentSvc {
         let name = request.into_inner().name.trim().to_string();
         if name.is_empty() {
             log::warn!(
-                "audit: delete_cluster failed remote_addr={remote_addr} reason=empty_name"
+                "delete_cluster failed remote_addr={remote_addr} reason=empty_name"
             );
             return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
         }
-        log::info!("audit: delete_cluster start remote_addr={remote_addr} name={name}");
+        log::info!("delete_cluster start remote_addr={remote_addr} name={name}");
 
         let deleted = match self.hosts().delete_by_name(&name).await {
             Ok(value) => value,
@@ -729,14 +729,14 @@ impl Agent for AgentSvc {
 
         if deleted == 0 {
             log::warn!(
-                "audit: delete_cluster failed remote_addr={remote_addr} name={name} reason=not_found"
+                "delete_cluster failed remote_addr={remote_addr} name={name} reason=not_found"
             );
             return Err(Status::invalid_argument(error_codes::NOT_FOUND));
         }
 
         self.sessions().remove_and_shutdown(&name).await;
         log::info!(
-            "audit: delete_cluster completed remote_addr={remote_addr} name={name}"
+            "delete_cluster completed remote_addr={remote_addr} name={name}"
         );
 
         Ok(tonic::Response::new(DeleteClusterResponse {
@@ -771,13 +771,13 @@ impl Agent for AgentSvc {
         };
         let requested_remote_path = remote_path.as_deref().unwrap_or("<default>");
         log::info!(
-            "audit: submit start remote_addr={remote_addr} name={name} local_path={local_path} requested_remote_path={requested_remote_path} sbatch={sbatchscript}"
+            "submit start remote_addr={remote_addr} name={name} local_path={local_path} requested_remote_path={requested_remote_path} sbatch={sbatchscript}"
         );
         let filters = match build_sync_filters(filters) {
             Ok(value) => value,
             Err(e) => {
                 log::warn!(
-                    "audit: submit failed remote_addr={remote_addr} name={name} reason=invalid_filters"
+                    "submit failed remote_addr={remote_addr} name={name} reason=invalid_filters"
                 );
                 return Err(e);
             }
@@ -803,20 +803,20 @@ impl Agent for AgentSvc {
             Err(e) => match e {
                 AgentSvcError::UnknownName => {
                     log::warn!(
-                        "audit: submit failed remote_addr={remote_addr} name={name} reason=unknown_cluster"
+                        "submit failed remote_addr={remote_addr} name={name} reason=unknown_cluster"
                     );
                     return Err(Status::invalid_argument(error_codes::NOT_FOUND));
                 }
                 AgentSvcError::NetworkError(e) => {
                     log::warn!(
-                        "audit: submit failed remote_addr={remote_addr} name={name} reason=network_error error={e}"
+                        "submit failed remote_addr={remote_addr} name={name} reason=network_error error={e}"
                     );
                     log::debug!("network error resolving session for submit: {e}");
                     return Err(Status::internal(error_codes::NETWORK_ERROR));
                 }
                 other_error => {
                     log::warn!(
-                        "audit: submit failed remote_addr={remote_addr} name={name} reason=session_error error={other_error}"
+                        "submit failed remote_addr={remote_addr} name={name} reason=session_error error={other_error}"
                     );
                     log::debug!("unexpected error resolving session for submit: {other_error}");
                     return Err(Status::internal(error_codes::INTERNAL_ERROR));
@@ -831,7 +831,7 @@ impl Agent for AgentSvc {
                     Ok(value) => value,
                     Err(e) => {
                         log::warn!(
-                            "audit: submit failed remote_addr={remote_addr} name={name} reason=invalid_remote_path"
+                            "submit failed remote_addr={remote_addr} name={name} reason=invalid_remote_path"
                         );
                         return Err(e);
                     }
@@ -842,7 +842,7 @@ impl Agent for AgentSvc {
                     Ok(value) => value,
                     Err(e) => {
                         log::warn!(
-                            "audit: submit failed remote_addr={remote_addr} name={name} reason=default_base_path_unavailable"
+                            "submit failed remote_addr={remote_addr} name={name} reason=default_base_path_unavailable"
                         );
                         return Err(e);
                     }
@@ -852,7 +852,7 @@ impl Agent for AgentSvc {
                     Ok(value) => value,
                     Err(e) => {
                         log::warn!(
-                            "audit: submit failed remote_addr={remote_addr} name={name} reason=invalid_remote_path"
+                            "submit failed remote_addr={remote_addr} name={name} reason=invalid_remote_path"
                         );
                         return Err(e);
                     }
@@ -860,7 +860,7 @@ impl Agent for AgentSvc {
             }
         };
         log::info!(
-            "audit: submit resolved remote_addr={remote_addr} name={name} remote_path={remote_path}"
+            "submit resolved remote_addr={remote_addr} name={name} remote_path={remote_path}"
         );
 
         if evt_tx
@@ -875,14 +875,14 @@ impl Agent for AgentSvc {
             .is_err()
         {
             log::warn!(
-                "audit: submit canceled remote_addr={remote_addr} name={name} reason=client_closed"
+                "submit canceled remote_addr={remote_addr} name={name} reason=client_closed"
             );
             return Err(Status::cancelled(error_codes::CANCELED));
         }
 
         if *cancel_rx.borrow() {
             log::warn!(
-                "audit: submit canceled remote_addr={remote_addr} name={name} reason=client_canceled"
+                "submit canceled remote_addr={remote_addr} name={name} reason=client_canceled"
             );
             return Err(Status::cancelled(error_codes::CANCELED));
         }
@@ -894,7 +894,7 @@ impl Agent for AgentSvc {
             Ok(_) => {}
             Err(e) => {
                 log::warn!(
-                    "audit: submit failed remote_addr={remote_addr} name={name} reason=connect_failed error={e}"
+                    "submit failed remote_addr={remote_addr} name={name} reason=connect_failed error={e}"
                 );
                 log::debug!("could not establish connection to {}: {}", &name, e);
                 let code = error_codes::code_for_ssh_error(&e);
@@ -906,7 +906,7 @@ impl Agent for AgentSvc {
             Ok(v) => v,
             Err(e) => {
                 log::warn!(
-                    "audit: submit failed remote_addr={remote_addr} name={name} reason=remote_path_check_failed error={e}"
+                    "submit failed remote_addr={remote_addr} name={name} reason=remote_path_check_failed error={e}"
                 );
                 log::debug!("can't list {} on {}: {}", &remote_path, &name, e);
                 return Err(Status::internal(error_codes::REMOTE_ERROR));
@@ -915,7 +915,7 @@ impl Agent for AgentSvc {
 
         if remote_path_exists {
             log::warn!(
-                "audit: submit failed remote_addr={remote_addr} name={name} reason=remote_path_exists remote_path={remote_path}"
+                "submit failed remote_addr={remote_addr} name={name} reason=remote_path_exists remote_path={remote_path}"
             );
             return Err(Status::already_exists(error_codes::CONFLICT));
         }
@@ -965,7 +965,7 @@ impl Agent for AgentSvc {
             };
             if let Err(err) = sync_result {
                 log::warn!(
-                    "audit: submit failed remote_addr={audit_remote_addr} name={name} reason=sync_failed error={err}"
+                    "submit failed remote_addr={audit_remote_addr} name={name} reason=sync_failed error={err}"
                 );
                 log::debug!("sync failed for submit: {err}");
                 let _ = evt_tx
@@ -1015,7 +1015,7 @@ impl Agent for AgentSvc {
                 Ok(v) => (v.0, v.1, v.2),
                 Err(e) => {
                     log::warn!(
-                        "audit: submit failed remote_addr={audit_remote_addr} name={name} reason=sbatch_exec_failed error={e}"
+                        "submit failed remote_addr={audit_remote_addr} name={name} reason=sbatch_exec_failed error={e}"
                     );
                     log::debug!("sbatch execution failed: {e}");
                     let _ = evt_tx
@@ -1049,7 +1049,7 @@ impl Agent for AgentSvc {
                     err_message.trim()
                 };
                 log::warn!(
-                    "audit: submit failed remote_addr={audit_remote_addr} name={name} reason=sbatch_nonzero_exit detail={detail}"
+                    "submit failed remote_addr={audit_remote_addr} name={name} reason=sbatch_nonzero_exit detail={detail}"
                 );
                 log::debug!("sbatch failed: {}", detail);
                 let _ = evt_tx
@@ -1067,7 +1067,7 @@ impl Agent for AgentSvc {
             let scheduler_id = crate::agent::slurm::parse_job_id(&out_string);
             if scheduler_id.is_none() {
                 log::warn!(
-                    "audit: submit failed remote_addr={audit_remote_addr} name={name} reason=missing_job_id"
+                    "submit failed remote_addr={audit_remote_addr} name={name} reason=missing_job_id"
                 );
                 log::debug!("sbatch did not return a job id");
                 let _ = evt_tx
@@ -1084,7 +1084,7 @@ impl Agent for AgentSvc {
 
             let Ok(Some(hr)) = hs.get_by_name(&name).await else {
                 log::warn!(
-                    "audit: submit failed remote_addr={audit_remote_addr} name={name} reason=unknown_cluster"
+                    "submit failed remote_addr={audit_remote_addr} name={name} reason=unknown_cluster"
                 );
                 log::debug!("unknown name '{}' while creating job record", name);
                 let _ = evt_tx
@@ -1108,7 +1108,7 @@ impl Agent for AgentSvc {
             match hs.insert_job(&nj).await {
                 Ok(job_id) => {
                     log::info!(
-                        "audit: submit completed remote_addr={audit_remote_addr} name={name} job_id={job_id} scheduler_id={:?} local_path={} remote_path={}",
+                        "submit completed remote_addr={audit_remote_addr} name={name} job_id={job_id} scheduler_id={:?} local_path={} remote_path={}",
                         nj.scheduler_id,
                         nj.local_path,
                         nj.remote_path
@@ -1125,7 +1125,7 @@ impl Agent for AgentSvc {
                 }
                 Err(e) => {
                     log::warn!(
-                        "audit: submit failed remote_addr={audit_remote_addr} name={name} reason=job_record_insert_failed error={e}"
+                        "submit failed remote_addr={audit_remote_addr} name={name} reason=job_record_insert_failed error={e}"
                     );
                     log::debug!("failed to create job record: {e}");
                     let _ = evt_tx
@@ -1177,7 +1177,7 @@ impl Agent for AgentSvc {
             Ok(value) => value,
             Err(e) => {
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={remote_addr} name={name} reason=invalid_host"
+                    "cluster_upsert failed remote_addr={remote_addr} name={name} reason=invalid_host"
                 );
                 return Err(e);
             }
@@ -1185,7 +1185,7 @@ impl Agent for AgentSvc {
         let host_label = format_address(&addr);
         let default_base_path_label = default_base_path.as_deref().unwrap_or("<none>");
         log::info!(
-            "audit: cluster_upsert start remote_addr={remote_addr} name={name} username={username} host={host_label} port={port} default_base_path={default_base_path_label}"
+            "cluster_upsert start remote_addr={remote_addr} name={name} username={username} host={host_label} port={port} default_base_path={default_base_path_label}"
         );
         let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
 
@@ -1204,7 +1204,7 @@ impl Agent for AgentSvc {
             Ok(value) => value,
             Err(e) => {
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={remote_addr} name={name} reason=invalid_port"
+                    "cluster_upsert failed remote_addr={remote_addr} name={name} reason=invalid_port"
                 );
                 return Err(e);
             }
@@ -1213,7 +1213,7 @@ impl Agent for AgentSvc {
             Ok(value) => value,
             Err(e) => {
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={remote_addr} name={name} reason=host_resolution_failed error={e}"
+                    "cluster_upsert failed remote_addr={remote_addr} name={name} reason=host_resolution_failed error={e}"
                 );
                 return Err(e);
             }
@@ -1237,7 +1237,7 @@ impl Agent for AgentSvc {
             };
             if let Err(e) = sm.ensure_connected(&evt_tx, &mut mfa_rx).await {
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=connect_failed error={e}"
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=connect_failed error={e}"
                 );
                 log::debug!("failed to connect to {name}: {e}");
                 let code = error_codes::code_for_ssh_error(&e);
@@ -1251,7 +1251,7 @@ impl Agent for AgentSvc {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=home_dir_failed error_code={:?}",
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=home_dir_failed error_code={:?}",
                         e.code()
                     );
                     let _ = evt_tx.send(Err(e)).await;
@@ -1265,7 +1265,7 @@ impl Agent for AgentSvc {
                 Ok((vo, ve, ec)) => (vo, ve, ec),
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=wlm_metadata_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=wlm_metadata_failed error={e}"
                     );
                     log::debug!("failed to gather cluster metadata for {name}: {e}");
                     let _ = evt_tx
@@ -1279,7 +1279,7 @@ impl Agent for AgentSvc {
                 let err_message =
                     String::from_utf8(err).unwrap_or("<error message could not be decoded>".into());
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=wlm_metadata_exit code={code}"
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=wlm_metadata_exit code={code}"
                 );
                 log::debug!(
                     "failed to gather cluster metadata for {name}: exit {}: {}",
@@ -1295,7 +1295,7 @@ impl Agent for AgentSvc {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=wlm_metadata_decode_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=wlm_metadata_decode_failed error={e}"
                     );
                     log::debug!(
                         "failed to gather cluster metadata for {name}: decode error: {e}"
@@ -1310,7 +1310,7 @@ impl Agent for AgentSvc {
             let wlms = crate::agent::managers::parse_wlms(&out);
             if !wlms.contains(&crate::agent::managers::WorkloadManager::Slurm) {
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=unsupported_scheduler"
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=unsupported_scheduler"
                 );
                 log::debug!(
                     "no supported workload managers found on {name}; identified: {:?}",
@@ -1327,7 +1327,7 @@ impl Agent for AgentSvc {
                 Ok((vo, ve, ec)) => (vo, ve, ec),
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_failed error={e}"
                     );
                     log::debug!("failed to gather cluster os metadata for {name}: {e}");
                     let _ = evt_tx
@@ -1341,7 +1341,7 @@ impl Agent for AgentSvc {
                 let err_message =
                     String::from_utf8(err).unwrap_or("<error message could not be decoded>".into());
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_exit code={code}"
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_exit code={code}"
                 );
                 log::debug!(
                     "failed to gather cluster os metadata for {name}: exit {}: {}",
@@ -1357,7 +1357,7 @@ impl Agent for AgentSvc {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_decode_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_decode_failed error={e}"
                     );
                     log::debug!(
                         "failed to gather cluster os metadata for {name}: decode error: {e}"
@@ -1373,7 +1373,7 @@ impl Agent for AgentSvc {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_parse_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=os_metadata_parse_failed error={e}"
                     );
                     log::debug!(
                         "failed to gather cluster os metadata for {name}: parse error: {e}"
@@ -1404,7 +1404,7 @@ impl Agent for AgentSvc {
                 Ok((vo, ve, ec)) => (vo, ve, ec),
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_failed error={e}"
                     );
                     log::debug!("failed to gather slurm version for {name}: {e}");
                     let _ = evt_tx
@@ -1418,7 +1418,7 @@ impl Agent for AgentSvc {
                 let err_message =
                     String::from_utf8(err).unwrap_or("<error message could not be decoded>".into());
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_exit code={code}"
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_exit code={code}"
                 );
                 log::debug!(
                     "failed to gather slurm version for {name}: exit {}: {}",
@@ -1434,7 +1434,7 @@ impl Agent for AgentSvc {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_decode_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_decode_failed error={e}"
                     );
                     log::debug!(
                         "failed to gather slurm version for {name}: decode error: {e}"
@@ -1448,7 +1448,7 @@ impl Agent for AgentSvc {
             let mut parts = out.split_whitespace();
             if parts.next().is_none() {
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_unexpected_output"
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_unexpected_output"
                 );
                 log::debug!(
                     "failed to gather slurm version for {name}: unexpected output: {out}"
@@ -1464,7 +1464,7 @@ impl Agent for AgentSvc {
                     Ok(vv) => vv,
                     Err(e) => {
                         log::warn!(
-                            "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_parse_failed error={e:?}"
+                            "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_parse_failed error={e:?}"
                         );
                         log::debug!("failed to parse slurm version for {name}: '{e:?}'");
                         let _ = evt_tx
@@ -1475,7 +1475,7 @@ impl Agent for AgentSvc {
                 },
                 None => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_missing"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_version_missing"
                     );
                     log::debug!(
                         "failed to gather slurm version for {name}: unexpected output: {out}"
@@ -1491,7 +1491,7 @@ impl Agent for AgentSvc {
                 Ok((vo, ve, ec)) => (vo, ve, ec),
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_config_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_config_failed error={e}"
                     );
                     log::debug!("failed to gather cluster config for {name}: {e}");
                     let _ = evt_tx
@@ -1502,7 +1502,7 @@ impl Agent for AgentSvc {
             };
             if code != 0 {
                 log::warn!(
-                    "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_config_exit code={code}"
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=slurm_config_exit code={code}"
                 );
                 log::debug!(
                     "failed to run `scontrol show config` on {name}: {}",
@@ -1535,7 +1535,7 @@ impl Agent for AgentSvc {
                     Ok(v) => v,
                     Err(e) => {
                         log::warn!(
-                            "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_invalid error_code={:?}",
+                            "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_invalid error_code={:?}",
                             e.code()
                         );
                         let _ = evt_tx.send(Err(e)).await;
@@ -1547,7 +1547,7 @@ impl Agent for AgentSvc {
                     Ok(v) => v,
                     Err(e) => {
                         log::warn!(
-                            "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_invalid error_code={:?}",
+                            "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_invalid error_code={:?}",
                             e.code()
                         );
                         let _ = evt_tx.send(Err(e)).await;
@@ -1560,7 +1560,7 @@ impl Agent for AgentSvc {
                     Ok((vo, ve, ec)) => (vo, ve, ec),
                     Err(e) => {
                         log::warn!(
-                            "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_create_failed error={e}"
+                            "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_create_failed error={e}"
                         );
                         log::debug!("failed to execute command `{}` on {}: {}", command, name, e);
                         let _ = evt_tx
@@ -1571,7 +1571,7 @@ impl Agent for AgentSvc {
                 };
                 if code != 0 {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_create_exit code={code}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=default_base_path_create_exit code={code}"
                     );
                     log::debug!(
                         "failed to create default_base_path on {}: {}",
@@ -1602,13 +1602,13 @@ impl Agent for AgentSvc {
             match hs.upsert_host(&new_host).await {
                 Ok(v) => {
                     log::info!(
-                        "audit: cluster_upsert completed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} host_id={v}"
+                        "cluster_upsert completed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} host_id={v}"
                     );
                     log::debug!("successfully upserted host with id {v}")
                 }
                 Err(e) => {
                     log::warn!(
-                        "audit: cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=host_upsert_failed error={e}"
+                        "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=host_upsert_failed error={e}"
                     );
                     log::debug!("failed to upsert host {name}: {e}");
                     let _ = evt_tx
@@ -1639,7 +1639,7 @@ impl Agent for AgentSvc {
             Some(ref v) => {
                 let Ok(Some(hr)) = self.hosts().get_by_name(v).await else {
                     log::warn!(
-                        "audit: list_jobs failed remote_addr={remote_addr} name={v} reason=not_found"
+                        "list_jobs failed remote_addr={remote_addr} name={v} reason=not_found"
                     );
                     return Err(Status::invalid_argument(error_codes::NOT_FOUND));
                 };
@@ -1666,7 +1666,7 @@ impl Agent for AgentSvc {
             .collect();
         let name_label = name_filter.as_deref().unwrap_or("<all>");
         log::info!(
-            "audit: list_jobs remote_addr={remote_addr} name={name_label} count={}",
+            "list_jobs remote_addr={remote_addr} name={name_label} count={}",
             api_jobs.len()
         );
         Ok(tonic::Response::new(ListJobsResponse { jobs: api_jobs }))
