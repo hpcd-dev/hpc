@@ -133,6 +133,42 @@ impl AgentSvc {
                     };
                     completed_ids.push((job.id, Some(terminal_state)));
                 } else {
+                    let command = format!("scontrol show job {job_id} -o");
+                    match sm.exec_capture(&command).await {
+                        Ok((out, err, code)) => {
+                            if code == 0 {
+                                let output = String::from_utf8_lossy(&out);
+                                if let Some(state) =
+                                    crate::agent::slurm::scontrol_job_state(&output)
+                                {
+                                    if crate::agent::slurm::slurm_state_is_active(&state) {
+                                        continue;
+                                    }
+                                    if crate::agent::slurm::slurm_state_is_terminal(&state) {
+                                        completed_ids.push((job.id, Some(state)));
+                                        continue;
+                                    }
+                                    log::debug!(
+                                        "scontrol returned non-terminal state for {name} job {job_id}: {state}"
+                                    );
+                                    continue;
+                                }
+                                log::debug!(
+                                    "scontrol returned no job state for {name} job {job_id}"
+                                );
+                            } else {
+                                log::warn!(
+                                    "scontrol returned {} on {name} for {job_id}: {}",
+                                    code,
+                                    String::from_utf8_lossy(&err)
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("scontrol check failed on {name} for {job_id}: {e}");
+                        }
+                    }
+
                     let command = format!("squeue -j {job_id} -h -o %i");
                     let (out, err, code) = match sm.exec_capture(&command).await {
                         Ok(v) => v,

@@ -219,6 +219,30 @@ pub fn sacct_terminal_state(output: &str) -> Option<String> {
     normalized.into_iter().find(|state| state != "COMPLETED")
 }
 
+pub fn scontrol_job_state(output: &str) -> Option<String> {
+    for token in output.split_whitespace() {
+        let Some(value) = token.strip_prefix("JobState=") else {
+            continue;
+        };
+        let normalized = normalize_slurm_state(value);
+        if normalized.is_empty() {
+            return None;
+        }
+        return Some(normalized);
+    }
+    None
+}
+
+pub fn slurm_state_is_active(state: &str) -> bool {
+    let normalized = normalize_slurm_state(state);
+    is_slurm_state_active(&normalized)
+}
+
+pub fn slurm_state_is_terminal(state: &str) -> bool {
+    let normalized = normalize_slurm_state(state);
+    is_slurm_state_terminal(&normalized)
+}
+
 fn normalize_slurm_state(state: &str) -> String {
     let token = state.split(['+', ':', '(']).next().unwrap_or(state).trim();
     token.to_ascii_uppercase()
@@ -418,6 +442,24 @@ PartitionName=gpu_bynode_q5 AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Alloc
     fn sacct_terminal_state_running_is_none() {
         let output = "RUNNING|\nCOMPLETED|\n";
         assert_eq!(sacct_terminal_state(output), None);
+    }
+
+    #[test]
+    fn scontrol_job_state_parses_state() {
+        let output = "JobId=123 JobName=foo JobState=COMPLETED Reason=None";
+        assert_eq!(scontrol_job_state(output).as_deref(), Some("COMPLETED"));
+    }
+
+    #[test]
+    fn scontrol_job_state_handles_compound_state() {
+        let output = "JobId=123 JobState=FAILED+COMPLETED Reason=None";
+        assert_eq!(scontrol_job_state(output).as_deref(), Some("FAILED"));
+    }
+
+    #[test]
+    fn scontrol_job_state_missing_is_none() {
+        let output = "JobId=123 JobName=foo Reason=None";
+        assert_eq!(scontrol_job_state(output), None);
     }
 
     #[test]
