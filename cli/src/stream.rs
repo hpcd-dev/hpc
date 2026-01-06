@@ -396,7 +396,7 @@ where
                             if let Some(spinner) = spinner.take() {
                                 spinner.stop(None).await;
                             }
-                            print_with_green_check_stderr("Transfer complete.")?;
+                            print_with_green_check_stderr("Data transfer complete.")?;
                         }
                         submit_status::Phase::Unspecified => {}
                     }

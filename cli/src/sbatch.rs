@@ -155,11 +155,7 @@ impl SbatchPicker {
             .map(|script| ListItem::new(script.as_str()))
             .collect();
         let list = List::new(items)
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
             .highlight_symbol("> ");
 
         let list_area = if area.height >= 3 {
