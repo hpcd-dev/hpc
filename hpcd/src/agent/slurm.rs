@@ -283,16 +283,24 @@ fn is_slurm_state_terminal(state: &str) -> bool {
 
 // returns a command to be executed on cluster to submit the job
 pub fn path_to_sbatch_command(p: &str, remote_base_path: Option<&str>) -> String {
+    let escaped_script = crate::ssh::sh_escape(p);
     if let Some(chdir_path) = remote_base_path {
-        format!("sbatch --chdir {} {}", chdir_path, p)
+        let escaped_dir = crate::ssh::sh_escape(chdir_path);
+        format!("cd {} && sbatch {}", escaped_dir, escaped_script)
     } else {
-        format!("sbatch {}", p)
+        format!("sbatch {}", escaped_script)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sbatch_command_uses_submit_dir() {
+        let cmd = path_to_sbatch_command("/remote/run/job.sbatch", Some("/remote/run"));
+        assert_eq!(cmd, "cd '/remote/run' && sbatch '/remote/run/job.sbatch'");
+    }
 
     const SAMPLE: &str = r#"PartitionName=cpu_std_interactive AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL AllocNodes=ALL Default=NO QoS=interactive DefaultTime=00:10:00 DisableRootJobs=YES ExclusiveUser=NO ExclusiveTopo=NO GraceTime=0 Hidden=NO MaxNodes=UNLIMITED MaxTime=06:00:00 MinNodes=1 LLN=NO MaxCPUsPerNode=UNLIMITED MaxCPUsPerSocket=UNLIMITED Nodes=x[1-500],y[1-8] PriorityJobFactor=1 PriorityTier=1 RootOnly=NO ReqResv=NO OverSubscribe=NO OverTimeLimit=NONE PreemptMode=OFF State=UP TotalCPUs=120000 TotalNodes=508 SelectTypeParameters=NONE JobDefaults=(null) DefMemPerCPU=192 MaxMemPerNode=UNLIMITED TRES=cpu=120000,mem=420000000M,node=508,billing=120000000 TRESBillingWeights=CPU=900,Mem=200G
 PartitionName=cpu_flexbackfill AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL AllocNodes=ALL Default=NO QoS=N/A DefaultTime=00:10:00 DisableRootJobs=YES ExclusiveUser=NO ExclusiveTopo=NO GraceTime=0 Hidden=NO MaxNodes=UNLIMITED MaxTime=2-00:00:00 MinNodes=1 LLN=NO MaxCPUsPerNode=UNLIMITED MaxCPUsPerSocket=UNLIMITED Nodes=x[1-150,155-500],z[1-12] PriorityJobFactor=1 PriorityTier=1 RootOnly=NO ReqResv=NO OverSubscribe=NO OverTimeLimit=NONE PreemptMode=OFF State=UP TotalCPUs=122400 TotalNodes=508 SelectTypeParameters=NONE JobDefaults=(null) DefMemPerCPU=192 MaxMemPerNode=UNLIMITED TRES=cpu=122400,mem=475000000M,node=508,billing=131000000 TRESBillingWeights=CPU=900,Mem=200G
