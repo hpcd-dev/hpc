@@ -5,8 +5,8 @@ use anyhow::bail;
 use clap::{CommandFactory, FromArgMatches};
 use cli::args::{Cli, ClusterCmd, Cmd, JobCmd};
 use cli::client::{
-    fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_delete_cluster, send_job_ls,
-    send_job_retrieve, send_ls, send_ping, send_resolve_home_dir, send_submit,
+    fetch_list_clusters, fetch_list_jobs, send_add_cluster, send_delete_cluster, send_job_logs,
+    send_job_ls, send_job_retrieve, send_ls, send_ping, send_resolve_home_dir, send_submit,
     validate_cluster_live,
 };
 use cli::config;
@@ -150,6 +150,12 @@ async fn main() -> anyhow::Result<()> {
                                 args.job_id
                             );
                         }
+                    }
+                }
+                JobCmd::Logs(args) => {
+                    let code = send_job_logs(&mut client, args.job_id, args.err).await?;
+                    if code != 0 {
+                        std::process::exit(code);
                     }
                 }
                 JobCmd::Ls(args) => {

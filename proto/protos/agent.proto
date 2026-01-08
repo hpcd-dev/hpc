@@ -95,6 +95,18 @@ message RetrieveJobRequest {
   }
 }
 
+message JobLogsRequestInit {
+  int64 job_id = 1; // internal job id from the daemon
+  bool stderr = 2; // fetch stderr log instead of stdout
+}
+
+message JobLogsRequest {
+  oneof msg {
+    JobLogsRequestInit init = 1;
+    MfaAnswer mfa = 2;
+  }
+}
+
 message SubmitRequestInit {
   string local_path = 1; // local project path
   optional string remote_path = 2; // path to where to locate the remote project
@@ -218,6 +230,7 @@ service Agent {
   rpc Ping(PingRequest) returns (PingReply);
   rpc Ls(stream LsRequest) returns (stream StreamEvent);
   rpc RetrieveJob(stream RetrieveJobRequest) returns (stream StreamEvent);
+  rpc JobLogs(stream JobLogsRequest) returns (stream StreamEvent);
   rpc Submit(stream SubmitRequest) returns (stream SubmitStreamEvent);
   rpc AddCluster(stream AddClusterRequest) returns (stream StreamEvent);
   rpc ResolveHomeDir(stream ResolveHomeDirRequest) returns (stream StreamEvent);

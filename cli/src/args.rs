@@ -57,6 +57,8 @@ pub enum JobCmd {
     List(ListJobsArgs),
     /// Show job details.
     Get(JobGetArgs),
+    /// Show job logs.
+    Logs(JobLogsArgs),
     /// List files in a job work directory.
     Ls(JobLsArgs),
     /// Retrieve a file or directory from a job run folder.
@@ -71,6 +73,15 @@ pub struct JobGetArgs {
     pub cluster: Option<String>,
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct JobLogsArgs {
+    /// Job id from the daemon.
+    pub job_id: i64,
+    /// Show stderr instead of stdout.
+    #[arg(long)]
+    pub err: bool,
 }
 
 #[derive(Args, Debug)]

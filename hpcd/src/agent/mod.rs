@@ -5,6 +5,7 @@ mod add_cluster;
 mod error_codes;
 mod helpers;
 mod rpc;
+mod sbatch;
 mod service;
 mod sessions;
 mod submit;

@@ -9,6 +9,7 @@ use crate::agent::helpers::{
     get_default_base_path,
 };
 use crate::agent::error_codes;
+use crate::agent::sbatch;
 use crate::agent::service::AgentSvc;
 use crate::agent::submit::{resolve_remote_sbatch_path, resolve_submit_remote_path};
 use crate::agent::types::{AgentSvcError, OutStream, SubmitOutStream};
@@ -19,9 +20,10 @@ use crate::util::remote_path::normalize_path;
 use proto::agent_server::Agent;
 use proto::{
     AddClusterRequest, DeleteClusterRequest, DeleteClusterResponse, ListClustersRequest,
-    ListClustersResponse, ListClustersUnitResponse, ListJobsRequest, ListJobsResponse, LsRequest,
-    LsRequestInit, MfaAnswer, PingReply, PingRequest, RetrieveJobRequest, RetrieveJobRequestInit,
-    StreamEvent, SubmitRequest, SubmitResult, SubmitStatus, SubmitStreamEvent, stream_event,
+    ListClustersResponse, ListClustersUnitResponse, ListJobsRequest, ListJobsResponse,
+    JobLogsRequest, JobLogsRequestInit, LsRequest, LsRequestInit, MfaAnswer, PingReply,
+    PingRequest, RetrieveJobRequest, RetrieveJobRequestInit, StreamEvent, SubmitRequest,
+    SubmitResult, SubmitStatus, SubmitStreamEvent, stream_event,
     submit_result, submit_status, submit_stream_event,
 };
 use std::net::{IpAddr, SocketAddr};
@@ -152,6 +154,7 @@ fn format_address(addr: &Address) -> String {
 impl Agent for AgentSvc {
     type LsStream = OutStream;
     type RetrieveJobStream = OutStream;
+    type JobLogsStream = OutStream;
     type SubmitStream = SubmitOutStream;
     type AddClusterStream = OutStream;
     type ResolveHomeDirStream = OutStream;
@@ -658,6 +661,248 @@ impl Agent for AgentSvc {
         Ok(tonic::Response::new(out))
     }
 
+    async fn job_logs(
+        &self,
+        request: tonic::Request<tonic::Streaming<JobLogsRequest>>,
+    ) -> Result<tonic::Response<Self::JobLogsStream>, Status> {
+        let remote_addr = format_remote_addr(request.remote_addr());
+        let mut inbound = request.into_inner();
+
+        let init = inbound
+            .message()
+            .await
+            .map_err(|e| {
+                log::debug!("read error in job_logs: {e}");
+                Status::unknown(error_codes::INTERNAL_ERROR)
+            })?
+            .ok_or_else(|| Status::invalid_argument(error_codes::INVALID_ARGUMENT))?;
+
+        let (job_id, stderr) = match init.msg {
+            Some(proto::job_logs_request::Msg::Init(JobLogsRequestInit { job_id, stderr })) => {
+                (job_id, stderr)
+            }
+            _ => {
+                return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
+            }
+        };
+        log::info!(
+            "job_logs start remote_addr={remote_addr} job_id={job_id} stderr={stderr}"
+        );
+
+        let (mfa_tx, mut mfa_rx) = tokio::sync::mpsc::channel::<MfaAnswer>(16);
+        tokio::spawn(async move {
+            while let Ok(Some(item)) = inbound.message().await {
+                if let Some(proto::job_logs_request::Msg::Mfa(ans)) = item.msg
+                    && mfa_tx.send(ans).await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, Status>>(64);
+        let hs = self.hosts();
+        let svc = self.clone();
+        let audit_remote_addr = remote_addr.clone();
+        tokio::spawn(async move {
+            let job = match hs.get_job_by_job_id(job_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    log::warn!(
+                        "job_logs failed remote_addr={audit_remote_addr} job_id={job_id} reason=job_not_found"
+                    );
+                    let message = format!(
+                        "job {} does not exist; you can list all job with 'hpc job list'",
+                        job_id
+                    );
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Stderr(
+                                format!("{message}\n").into_bytes(),
+                            )),
+                        }))
+                        .await;
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                error_codes::NOT_FOUND.to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "job_logs failed remote_addr={audit_remote_addr} job_id={job_id} reason=db_error"
+                    );
+                    log::debug!("could not fetch job id {job_id}: {e}");
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                error_codes::INTERNAL_ERROR.to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+
+            let log_path = if stderr {
+                match job.stderr_path.clone() {
+                    Some(path) if !path.trim().is_empty() => path,
+                    _ => {
+                        let message = format!(
+                            "stderr log file is not configured for job {}",
+                            job_id
+                        );
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Stderr(
+                                    format!("{message}\n").into_bytes(),
+                                )),
+                            }))
+                            .await;
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(
+                                    error_codes::INVALID_ARGUMENT.to_string(),
+                                )),
+                            }))
+                            .await;
+                        return;
+                    }
+                }
+            } else {
+                if job.stdout_path.trim().is_empty() {
+                    let message =
+                        format!("stdout log file is not configured for job {}", job_id);
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Stderr(
+                                format!("{message}\n").into_bytes(),
+                            )),
+                        }))
+                        .await;
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                error_codes::NOT_FOUND.to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+                job.stdout_path.clone()
+            };
+
+            let mgr = match svc.get_sessionmanager(&job.name).await {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!(
+                        "job_logs failed remote_addr={audit_remote_addr} job_id={job_id} name={} reason=session_unavailable",
+                        job.name
+                    );
+                    let message = match e {
+                        AgentSvcError::UnknownName => error_codes::NOT_FOUND,
+                        AgentSvcError::NetworkError(e) => {
+                            log::debug!("network error for {}: {e}", job.name);
+                            error_codes::NETWORK_ERROR
+                        }
+                        other_error => {
+                            log::debug!(
+                                "unexpected session manager error for {}: {other_error}",
+                                job.name
+                            );
+                            error_codes::INTERNAL_ERROR
+                        }
+                    };
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(message.to_string())),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+
+            if let Err(err) = mgr.ensure_connected(&evt_tx, &mut mfa_rx).await {
+                log::warn!(
+                    "job_logs failed remote_addr={audit_remote_addr} job_id={job_id} name={} reason=connect_failed error={err}",
+                    job.name
+                );
+                log::debug!("failed to connect for job logs on {}: {err}", job.name);
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(
+                            error_codes::code_for_ssh_error(&err).to_string(),
+                        )),
+                    }))
+                    .await;
+                return;
+            }
+
+            let escaped = sh_escape(&log_path);
+            let test_cmd = format!("test -f {}", escaped);
+            match mgr.exec_capture(&test_cmd).await {
+                Ok((_out, _err, code)) if code == 0 => {}
+                Ok((_out, _err, _code)) => {
+                    let message = if stderr {
+                        format!("specified error file {} wasn't found", log_path)
+                    } else {
+                        format!("stdout log file does not exist at {}", log_path)
+                    };
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Stderr(
+                                format!("{message}\n").into_bytes(),
+                            )),
+                        }))
+                        .await;
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                error_codes::NOT_FOUND.to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "job_logs failed remote_addr={audit_remote_addr} job_id={job_id} name={} reason=remote_check_failed error={e}",
+                        job.name
+                    );
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                error_codes::REMOTE_ERROR.to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+            }
+
+            let command = format!("cat -- {}", escaped);
+            if let Err(err) = mgr.exec(&command, evt_tx.clone(), mfa_rx).await {
+                log::warn!(
+                    "job_logs failed remote_addr={audit_remote_addr} job_id={job_id} name={} reason=exec_failed error={err}",
+                    job.name
+                );
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(
+                            error_codes::REMOTE_ERROR.to_string(),
+                        )),
+                    }))
+                    .await;
+            }
+        });
+
+        let out: OutStream = Box::pin(crate::ssh::receiver_to_stream(evt_rx));
+        Ok(tonic::Response::new(out))
+    }
+
     async fn list_clusters(
         &self,
         request: tonic::Request<ListClustersRequest>,
@@ -1081,6 +1326,44 @@ impl Agent for AgentSvc {
                     .await;
                 return;
             }
+            let scheduler_id = scheduler_id.unwrap();
+
+            let sbatch_path = {
+                let sbatch_path = PathBuf::from(&sbatchscript);
+                if sbatch_path.is_absolute() {
+                    sbatch_path
+                } else {
+                    PathBuf::from(&local_path).join(&sbatchscript)
+                }
+            };
+            let templates = match std::fs::read_to_string(&sbatch_path) {
+                Ok(contents) => sbatch::parse_sbatch_log_templates(&contents),
+                Err(e) => {
+                    log::warn!(
+                        "submit log parse failed remote_addr={audit_remote_addr} name={name} sbatchscript={} error={e}",
+                        sbatch_path.to_string_lossy()
+                    );
+                    sbatch::SbatchLogTemplates {
+                        stdout: None,
+                        stderr: None,
+                    }
+                }
+            };
+            let stdout_template = templates
+                .stdout
+                .unwrap_or_else(|| sbatch::DEFAULT_STDOUT_TEMPLATE.to_string());
+            let stdout_path = sbatch::resolve_log_path(&stdout_template, &remote_path, scheduler_id);
+            let stderr_path = templates
+                .stderr
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+                .map(|template| sbatch::resolve_log_path(&template, &remote_path, scheduler_id));
 
             let Ok(Some(hr)) = hs.get_by_name(&name).await else {
                 log::warn!(
@@ -1100,10 +1383,12 @@ impl Agent for AgentSvc {
             };
 
             let nj = crate::state::db::NewJob {
-                scheduler_id,
+                scheduler_id: Some(scheduler_id),
                 host_id: hr.id,
                 local_path,
                 remote_path,
+                stdout_path,
+                stderr_path,
             };
             match hs.insert_job(&nj).await {
                 Ok(job_id) => {

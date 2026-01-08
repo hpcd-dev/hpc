@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Alex Sizykh
 
 use crate::errors::{format_server_error, format_status_error};
-use crate::mfa::{clear_transient_mfa, collect_mfa_answers_transient};
+use crate::mfa::{clear_transient_mfa, collect_mfa_answers, collect_mfa_answers_transient};
 use crate::stream::{
     MinDurationSpinner, Spinner, SubmitStreamOutcome, ensure_exit_code, handle_stream_events,
     handle_stream_events_with_progress, handle_submit_stream_events, print_with_green_check_stderr,
@@ -11,12 +11,13 @@ use anyhow::bail;
 use proto::agent_client::AgentClient;
 use proto::{
     AddClusterInit, AddClusterRequest, DeleteClusterRequest, DeleteClusterResponse,
-    ListClustersRequest, ListClustersResponse, ListJobsRequest, ListJobsResponse, LsRequest,
-    LsRequestInit, ResolveHomeDirRequest, ResolveHomeDirRequestInit, RetrieveJobRequest,
-    RetrieveJobRequestInit, SubmitPathFilterRule, SubmitRequest, add_cluster_init,
-    add_cluster_request, list_clusters_unit_response, resolve_home_dir_request,
+    JobLogsRequest, JobLogsRequestInit, ListClustersRequest, ListClustersResponse, ListJobsRequest,
+    ListJobsResponse, LsRequest, LsRequestInit, ResolveHomeDirRequest, ResolveHomeDirRequestInit,
+    RetrieveJobRequest, RetrieveJobRequestInit, SubmitPathFilterRule, SubmitRequest,
+    add_cluster_init, add_cluster_request, list_clusters_unit_response, resolve_home_dir_request,
     resolve_home_dir_request_init, stream_event,
 };
+use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -166,6 +167,79 @@ pub async fn send_job_ls(
 ) -> anyhow::Result<()> {
     let name = cluster.clone().unwrap_or_default();
     send_ls_request(client, name, Some(job_id), path.to_owned()).await
+}
+
+pub async fn send_job_logs(
+    client: &mut AgentClient<Channel>,
+    job_id: i64,
+    stderr: bool,
+) -> anyhow::Result<i32> {
+    let (tx_ans, rx_ans) = mpsc::channel::<JobLogsRequest>(16);
+    let outbound = ReceiverStream::new(rx_ans);
+    tx_ans
+        .send(JobLogsRequest {
+            msg: Some(proto::job_logs_request::Msg::Init(JobLogsRequestInit {
+                job_id,
+                stderr,
+            })),
+        })
+        .await?;
+
+    let response = client
+        .job_logs(Request::new(outbound))
+        .await
+        .map_err(|status| anyhow::Error::msg(format_status_error(&status)))?;
+    let mut inbound = response.into_inner();
+    let tx_mfa = tx_ans.clone();
+    let mut exit_code: Option<i32> = None;
+    while let Some(item) = inbound.next().await {
+        match item {
+            Ok(proto::StreamEvent { event: Some(ev) }) => match ev {
+                stream_event::Event::Stdout(bytes) => {
+                    std::io::stdout().write_all(&bytes)?;
+                }
+                stream_event::Event::Stderr(bytes) => {
+                    std::io::stderr().write_all(&bytes)?;
+                }
+                stream_event::Event::ExitCode(code) => {
+                    exit_code = Some(code);
+                    break;
+                }
+                stream_event::Event::Mfa(mfa) => {
+                    let answers = collect_mfa_answers(&mfa).await?;
+                    tx_mfa
+                        .send(JobLogsRequest {
+                            msg: Some(proto::job_logs_request::Msg::Mfa(answers)),
+                        })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("server closed while sending MFA answers"))?;
+                }
+                stream_event::Event::Error(err) => {
+                    if err != "not_found" && err != "invalid_argument" {
+                        eprintln!("{}", format_server_error(&err));
+                    }
+                    exit_code = Some(job_logs_error_exit_code(&err));
+                    break;
+                }
+            },
+            Ok(proto::StreamEvent { event: None }) => {}
+            Err(status) => {
+                eprintln!("{}", format_status_error(&status));
+                exit_code = Some(1);
+                break;
+            }
+        }
+    }
+
+    Ok(exit_code.unwrap_or(0))
+}
+
+fn job_logs_error_exit_code(err: &str) -> i32 {
+    match err {
+        "invalid_argument" => 2,
+        "not_found" => 3,
+        _ => 1,
+    }
 }
 
 pub async fn send_job_retrieve(
