@@ -163,14 +163,18 @@ async fn main() -> anyhow::Result<()> {
                     send_job_ls(&mut client, args.job_id, &args.path, &args.cluster).await?
                 }
                 JobCmd::Retrieve(args) => {
-                    send_job_retrieve(
+                    let code = send_job_retrieve(
                         &mut client,
                         args.job_id,
                         &args.path,
-                        &args.dest,
-                        &args.cluster,
+                        &args.output,
+                        args.overwrite,
+                        args.headless,
                     )
-                    .await?
+                    .await?;
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
                 }
             }
         }

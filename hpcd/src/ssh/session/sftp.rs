@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use proto::{MfaAnswer, SubmitStreamEvent};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tokio::fs as tokiofs;
@@ -348,9 +349,21 @@ impl SessionManager {
         sync_dir_with_executor(self, local_dir, remote_dir, options, evt_tx, mfa_rx).await
     }
 
-    pub async fn retrieve_path(&self, remote_path: &str, local_path: &Path) -> Result<()> {
+    pub async fn retrieve_path(
+        &self,
+        remote_path: &str,
+        local_path: &Path,
+        overwrite: bool,
+    ) -> Result<()> {
         let sftp = self.sftp().await?;
         let meta = sftp.metadata(remote_path).await?;
+        if !overwrite {
+            if meta.is_dir() {
+                ensure_no_dir_overwrite(&sftp, remote_path, local_path).await?;
+            } else {
+                ensure_no_file_overwrite(local_path).await?;
+            }
+        }
         if meta.is_dir() {
             download_dir(&sftp, remote_path, local_path).await
         } else {
@@ -448,6 +461,59 @@ async fn download_dir(sftp: &SftpSession, remote_dir: &str, local_dir: &Path) ->
                 stack.push((remote_child, local_child));
             } else {
                 download_file(sftp, &remote_child, &local_child).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_no_file_overwrite(path: &Path) -> Result<()> {
+    match tokiofs::metadata(path).await {
+        Ok(_) => Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("local path exists: {}", path.display()),
+        )
+        .into()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn ensure_no_dir_overwrite(
+    sftp: &SftpSession,
+    remote_dir: &str,
+    local_dir: &Path,
+) -> Result<()> {
+    let mut stack: Vec<(String, PathBuf)> = vec![(
+        remote_dir.trim_end_matches('/').to_string(),
+        local_dir.to_path_buf(),
+    )];
+
+    while let Some((remote_base, local_base)) = stack.pop() {
+        match tokiofs::metadata(&local_base).await {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    return Err(io::Error::new(
+                        ErrorKind::AlreadyExists,
+                        format!("local path exists: {}", local_base.display()),
+                    )
+                    .into());
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        let entries = sftp.read_dir(&remote_base).await?;
+        for entry in entries {
+            let name = entry.file_name();
+            let remote_child = format!("{}/{}", remote_base, name);
+            let local_child = local_base.join(&name);
+            let meta = entry.metadata();
+            if meta.is_dir() {
+                stack.push((remote_child, local_child));
+            } else {
+                ensure_no_file_overwrite(&local_child).await?;
             }
         }
     }

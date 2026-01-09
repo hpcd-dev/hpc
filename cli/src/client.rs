@@ -17,9 +17,9 @@ use proto::{
     add_cluster_init, add_cluster_request, list_clusters_unit_response, resolve_home_dir_request,
     resolve_home_dir_request_init, stream_event,
 };
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use tokio_stream::wrappers::ReceiverStream;
@@ -242,14 +242,68 @@ fn job_logs_error_exit_code(err: &str) -> i32 {
     }
 }
 
+fn job_retrieve_error_exit_code(err: &str) -> i32 {
+    match err {
+        "invalid_argument" => 2,
+        "not_found" => 3,
+        "conflict" => 4,
+        _ => 1,
+    }
+}
+
+fn normalize_path(p: impl AsRef<Path>) -> PathBuf {
+    let mut out = PathBuf::new();
+    let p = p.as_ref();
+    let mut comps = p.components().peekable();
+    while let Some(c) = comps.peek() {
+        match c {
+            Component::Prefix(prefix) => {
+                out.push(Path::new(prefix.as_os_str()));
+                comps.next();
+            }
+            Component::RootDir => {
+                out.push(Path::new(std::path::MAIN_SEPARATOR_STR));
+                comps.next();
+            }
+            _ => break,
+        }
+    }
+
+    for comp in comps {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let popped = out.pop();
+                if !popped || out.as_os_str().is_empty() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(seg) => {
+                out.push(seg);
+            }
+            Component::Prefix(_) | Component::RootDir => {}
+        }
+    }
+
+    out
+}
+
 pub async fn send_job_retrieve(
     client: &mut AgentClient<Channel>,
     job_id: i64,
     path: &str,
-    dest: &Option<PathBuf>,
-    cluster: &Option<String>,
-) -> anyhow::Result<()> {
-    let mut local_base = match dest {
+    output: &Option<PathBuf>,
+    overwrite: bool,
+    headless: bool,
+) -> anyhow::Result<i32> {
+    let display_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    let retrieve_message = format!("Retrieving {display_name}");
+    let use_tty = std::io::stderr().is_terminal();
+    let min_spinner_duration = Duration::from_millis(500);
+    let mut local_base = match output {
         Some(v) => v.clone(),
         None => std::env::current_dir()?,
     };
@@ -257,6 +311,15 @@ pub async fn send_job_retrieve(
         local_base = std::env::current_dir()?.join(local_base);
     }
     let local_path = local_base.to_string_lossy().into_owned();
+    let local_target = if Path::new(path).is_absolute() {
+        let normalized = normalize_path(Path::new(path));
+        match normalized.file_name() {
+            Some(name) => local_base.join(name),
+            None => local_base.clone(),
+        }
+    } else {
+        local_base.join(Path::new(path))
+    };
 
     let (tx_ans, rx_ans) = mpsc::channel::<RetrieveJobRequest>(16);
     let outbound = ReceiverStream::new(rx_ans);
@@ -265,33 +328,110 @@ pub async fn send_job_retrieve(
             msg: Some(proto::retrieve_job_request::Msg::Init(
                 RetrieveJobRequestInit {
                     job_id,
-                    name: cluster.to_owned(),
                     path: path.to_owned(),
                     local_path: Some(local_path),
+                    overwrite,
                 },
             )),
         })
         .await?;
 
-    let response = client
-        .retrieve_job(Request::new(outbound))
-        .await
-        .map_err(|status| anyhow::Error::msg(format_status_error(&status)))?;
-    let inbound = response.into_inner();
-    let tx_mfa = tx_ans.clone();
-    let exit_code = handle_stream_events(inbound, move |answers| {
-        let tx_mfa = tx_mfa.clone();
-        async move {
-            tx_mfa
-                .send(RetrieveJobRequest {
-                    msg: Some(proto::retrieve_job_request::Msg::Mfa(answers)),
-                })
-                .await
-                .map_err(|_| anyhow::anyhow!("server closed while sending MFA answers"))
+    let mut spinner = if !headless && use_tty {
+        Some(MinDurationSpinner::start(
+            &retrieve_message,
+            min_spinner_duration,
+        ))
+    } else if !headless {
+        eprintln!("{retrieve_message}");
+        None
+    } else {
+        None
+    };
+
+    let response = match client.retrieve_job(Request::new(outbound)).await {
+        Ok(response) => response,
+        Err(status) => {
+            if let Some(spinner) = spinner.take() {
+                spinner.stop(None).await;
+            }
+            return Err(anyhow::Error::msg(format_status_error(&status)));
         }
-    })
-    .await?;
-    ensure_exit_code(exit_code, "received exit code")
+    };
+    let mut inbound = response.into_inner();
+    let tx_mfa = tx_ans.clone();
+    let mut exit_code: Option<i32> = None;
+    while let Some(item) = inbound.next().await {
+        match item {
+            Ok(proto::StreamEvent { event: Some(ev) }) => match ev {
+                stream_event::Event::Stdout(bytes) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop(None).await;
+                    }
+                    std::io::stdout().write_all(&bytes)?;
+                }
+                stream_event::Event::Stderr(bytes) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop(None).await;
+                    }
+                    std::io::stderr().write_all(&bytes)?;
+                }
+                stream_event::Event::ExitCode(code) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop(None).await;
+                    }
+                    exit_code = Some(code);
+                    break;
+                }
+                stream_event::Event::Mfa(mfa) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop(None).await;
+                    }
+                    let answers = collect_mfa_answers(&mfa).await?;
+                    tx_mfa
+                        .send(RetrieveJobRequest {
+                            msg: Some(proto::retrieve_job_request::Msg::Mfa(answers)),
+                        })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("server closed while sending MFA answers"))?;
+                    if !headless && use_tty {
+                        spinner = Some(MinDurationSpinner::start(
+                            &retrieve_message,
+                            min_spinner_duration,
+                        ));
+                    }
+                }
+                stream_event::Event::Error(err) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop(None).await;
+                    }
+                    if err != "not_found" && err != "conflict" {
+                        eprintln!("{}", format_server_error(&err));
+                    }
+                    exit_code = Some(job_retrieve_error_exit_code(&err));
+                    break;
+                }
+            },
+            Ok(proto::StreamEvent { event: None }) => {}
+            Err(status) => {
+                if let Some(spinner) = spinner.take() {
+                    spinner.stop(None).await;
+                }
+                eprintln!("{}", format_status_error(&status));
+                exit_code = Some(1);
+                break;
+            }
+        }
+    }
+
+    if let Some(spinner) = spinner.take() {
+        spinner.stop(None).await;
+    }
+
+    let code = exit_code.unwrap_or(0);
+    if code == 0 {
+        eprintln!("Wrote to {}", local_target.display());
+    }
+    Ok(code)
 }
 
 pub async fn send_submit(

@@ -26,6 +26,8 @@ use proto::{
     SubmitResult, SubmitStatus, SubmitStreamEvent, stream_event,
     submit_result, submit_status, submit_stream_event,
 };
+use russh_sftp::client::error::Error as SftpError;
+use russh_sftp::protocol::StatusCode as SftpStatusCode;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -102,6 +104,27 @@ fn resolve_default_base_path(
     }
 
     Ok(Some(raw))
+}
+
+fn is_sftp_missing_path(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let Some(sftp_error) = cause.downcast_ref::<SftpError>() else {
+            return false;
+        };
+        matches!(
+            sftp_error,
+            SftpError::Status(status) if status.status_code == SftpStatusCode::NoSuchFile
+        )
+    })
+}
+
+fn is_local_path_conflict(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let Some(io_err) = cause.downcast_ref::<std::io::Error>() else {
+            return false;
+        };
+        io_err.kind() == std::io::ErrorKind::AlreadyExists
+    })
 }
 
 async fn send_add_cluster_progress(
@@ -442,21 +465,20 @@ impl Agent for AgentSvc {
             })?
             .ok_or_else(|| Status::invalid_argument(error_codes::INVALID_ARGUMENT))?;
 
-        let (job_id, name, path, local_path) = match init.msg {
+        let (job_id, path, local_path, overwrite) = match init.msg {
             Some(proto::retrieve_job_request::Msg::Init(RetrieveJobRequestInit {
                 job_id,
-                name,
                 path,
                 local_path,
-            })) => (job_id, name, path, local_path),
+                overwrite,
+            })) => (job_id, path, local_path, overwrite),
             _ => {
                 return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
             }
         };
-        let name_label = name.as_deref().unwrap_or("<none>");
         let local_path_label = local_path.as_deref().unwrap_or("<none>");
         log::info!(
-            "retrieve_job start remote_addr={remote_addr} job_id={job_id} name={name_label} path={path} local_path={local_path_label}"
+            "retrieve_job start remote_addr={remote_addr} job_id={job_id} path={path} local_path={local_path_label}"
         );
 
         if path.trim().is_empty() {
@@ -524,21 +546,6 @@ impl Agent for AgentSvc {
                         return;
                     }
                 };
-                if let Some(expected) = name.as_deref()
-                    && expected != job.name
-                {
-                    log::warn!(
-                        "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={expected} reason=name_mismatch"
-                    );
-                    let _ = evt_tx
-                        .send(Ok(StreamEvent {
-                            event: Some(stream_event::Event::Error(
-                                error_codes::NOT_FOUND.to_string(),
-                            )),
-                        }))
-                        .await;
-                    return;
-                }
                 (job.name.clone(), job.remote_path.clone())
             };
 
@@ -631,7 +638,51 @@ impl Agent for AgentSvc {
                 local_base.join(std::path::Path::new(&path))
             };
 
-            if let Err(err) = mgr.retrieve_path(&remote_path, &local_target).await {
+            if let Err(err) = mgr
+                .retrieve_path(&remote_path, &local_target, overwrite)
+                .await
+            {
+                if is_sftp_missing_path(&err) {
+                    log::warn!(
+                        "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=remote_path_missing error={err}"
+                    );
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Stderr(
+                                b"No such file or directory\n".to_vec(),
+                            )),
+                        }))
+                        .await;
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                error_codes::NOT_FOUND.to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+                if is_local_path_conflict(&err) {
+                    log::warn!(
+                        "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=local_path_exists error={err}"
+                    );
+                    let message = format!("{err}; use --overwrite to replace it.");
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Stderr(
+                                format!("{message}\n").into_bytes(),
+                            )),
+                        }))
+                        .await;
+                    let _ = evt_tx
+                        .send(Ok(StreamEvent {
+                            event: Some(stream_event::Event::Error(
+                                error_codes::CONFLICT.to_string(),
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
                 log::warn!(
                     "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=remote_retrieve_failed error={err}"
                 );

@@ -97,10 +97,12 @@ pub struct JobRetrieveArgs {
     /// Job id from the daemon.
     pub job_id: i64,
     pub path: String,
+    #[arg(long, help = "Directory where the requested file or directory will be placed.")]
+    pub output: Option<PathBuf>,
+    #[arg(long, help = "Overwrite existing local files.")]
+    pub overwrite: bool,
     #[arg(long)]
-    pub dest: Option<PathBuf>,
-    #[arg(long)]
-    pub cluster: Option<String>,
+    pub headless: bool,
 }
 
 #[derive(Args, Debug)]
