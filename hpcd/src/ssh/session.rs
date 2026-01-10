@@ -107,6 +107,17 @@ impl SessionManager {
         }
     }
 
+    pub fn is_connected_nonblocking(&self) -> bool {
+        let Ok(handle_field) = self.handle.try_lock() else {
+            return false;
+        };
+        match handle_field.as_ref() {
+            None => false,
+            Some(h) if h.is_closed() => false,
+            Some(_) => true,
+        }
+    }
+
     pub fn matches_params(&self, params: &SshParams) -> bool {
         self.params == *params
     }

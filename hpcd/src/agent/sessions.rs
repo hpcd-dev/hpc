@@ -57,7 +57,7 @@ impl SessionCache {
         let Some(session) = self.get(name).await else {
             return false;
         };
-        !session.needs_connect().await
+        session.is_connected_nonblocking()
     }
 
     pub async fn get_or_create(
