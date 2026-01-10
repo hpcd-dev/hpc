@@ -1,0 +1,1 @@
+sample payload for binary output test

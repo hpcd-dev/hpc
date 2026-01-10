@@ -9,11 +9,13 @@
 ╚═╝  ╚═╝╚═╝      ╚═════╝
 ```
 </div>
+> **⚠️ Alpha Software Warning**
+> hpc is in alpha stage. Expect bugs and interface changes between minor versions.
+
 
 `hpc` provides a local-first interface to Slurm over SSH.
 
 It allows you to do supercomputing from the comfort of your local development environment. 
-
 
 - **Add a cluster**: just tell `hpc` how to connect to a cluster over SSH, and it will handle the rest for you.
 - **Submit a job**: `hpc` will handle for you where the submitted code and data will go and 

@@ -1,0 +1,3 @@
+# Example HPC config using a non-default port.
+port = 50057
+database_path = "/Users/alexsizykh/Projects/hpc/rusttest/test.db"
