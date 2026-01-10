@@ -1412,35 +1412,6 @@ impl Agent for AgentSvc {
                     PathBuf::from(&local_path).join(&sbatchscript)
                 }
             };
-            let templates = match std::fs::read_to_string(&sbatch_path) {
-                Ok(contents) => sbatch::parse_sbatch_log_templates(&contents),
-                Err(e) => {
-                    log::warn!(
-                        "submit log parse failed remote_addr={audit_remote_addr} name={name} sbatchscript={} error={e}",
-                        sbatch_path.to_string_lossy()
-                    );
-                    sbatch::SbatchLogTemplates {
-                        stdout: None,
-                        stderr: None,
-                    }
-                }
-            };
-            let stdout_template = templates
-                .stdout
-                .unwrap_or_else(|| sbatch::DEFAULT_STDOUT_TEMPLATE.to_string());
-            let stdout_path = sbatch::resolve_log_path(&stdout_template, &remote_path, scheduler_id);
-            let stderr_path = templates
-                .stderr
-                .and_then(|value| {
-                    let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                })
-                .map(|template| sbatch::resolve_log_path(&template, &remote_path, scheduler_id));
-
             let Ok(Some(hr)) = hs.get_by_name(&name).await else {
                 log::warn!(
                     "submit failed remote_addr={audit_remote_addr} name={name} reason=unknown_cluster"
@@ -1457,6 +1428,56 @@ impl Agent for AgentSvc {
                     .await;
                 return;
             };
+            let templates = match std::fs::read_to_string(&sbatch_path) {
+                Ok(contents) => sbatch::parse_sbatch_log_templates(&contents),
+                Err(e) => {
+                    log::warn!(
+                        "submit log parse failed remote_addr={audit_remote_addr} name={name} sbatchscript={} error={e}",
+                        sbatch_path.to_string_lossy()
+                    );
+                    sbatch::SbatchLogTemplates {
+                        stdout: None,
+                        stderr: None,
+                        job_name: None,
+                    }
+                }
+            };
+            let sbatch::SbatchLogTemplates {
+                stdout,
+                stderr,
+                job_name,
+            } = templates;
+            let default_job_name = sbatch_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("job");
+            let job_name = job_name.unwrap_or_else(|| default_job_name.to_string());
+            let stdout_template = stdout.unwrap_or_else(|| sbatch::DEFAULT_STDOUT_TEMPLATE.to_string());
+            let stdout_path = sbatch::resolve_log_path(
+                &stdout_template,
+                &remote_path,
+                scheduler_id,
+                Some(job_name.as_str()),
+                Some(hr.username.as_str()),
+            );
+            let stderr_path = stderr.and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+                .map(|template| {
+                    sbatch::resolve_log_path(
+                        &template,
+                        &remote_path,
+                        scheduler_id,
+                        Some(job_name.as_str()),
+                        Some(hr.username.as_str()),
+                    )
+                });
 
             let nj = crate::state::db::NewJob {
                 scheduler_id: Some(scheduler_id),

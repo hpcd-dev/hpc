@@ -133,6 +133,18 @@ def validate_smoke(project_out, repo_root):
         raise RuntimeError("smoke: input.sha256 mismatch")
 
 
+def validate_smoke_logs(hpc_cmd, job_id):
+    stdout_logs = run_cmd(hpc_cmd + ["job", "logs", str(job_id)])
+    stdout_output = (stdout_logs.stdout or "") + (stdout_logs.stderr or "")
+    if "smoke run on" not in stdout_output:
+        raise RuntimeError("smoke: stdout logs missing expected output")
+
+    stderr_logs = run_cmd(hpc_cmd + ["job", "logs", str(job_id), "--err"])
+    stderr_output = (stderr_logs.stdout or "") + (stderr_logs.stderr or "")
+    if "stderr check: this should show up in --err logs" not in stderr_output:
+        raise RuntimeError("smoke: stderr logs missing expected output")
+
+
 def validate_python_stats(project_out):
     results_dir = project_out / "results"
     stats = json.loads((results_dir / "stats.json").read_text())
@@ -316,6 +328,10 @@ def main():
 
             wait_for_job(hpc_cmd, job_id, args.timeout, args.poll)
             print(f"{project['id']}: job {job_id} completed")
+
+            if project["id"] == "01_smoke":
+                validate_smoke_logs(hpc_cmd, job_id)
+                print(f"{project['id']}: logs ok")
 
             project_out = out_dir / project["id"] / str(job_id)
             project_out.mkdir(parents=True, exist_ok=True)

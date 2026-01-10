@@ -10,11 +10,13 @@ pub const DEFAULT_STDOUT_TEMPLATE: &str = "slurm-%j.out";
 pub struct SbatchLogTemplates {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
+    pub job_name: Option<String>,
 }
 
 pub fn parse_sbatch_log_templates(script: &str) -> SbatchLogTemplates {
     let mut stdout: Option<String> = None;
     let mut stderr: Option<String> = None;
+    let mut job_name: Option<String> = None;
 
     for line in script.lines() {
         let line = line.trim();
@@ -39,6 +41,11 @@ pub fn parse_sbatch_log_templates(script: &str) -> SbatchLogTemplates {
                 i += 1;
                 continue;
             }
+            if let Some(value) = parse_flag_value(tok, "-J", "--job-name") {
+                job_name = normalize_value(value);
+                i += 1;
+                continue;
+            }
             if tok == "-o" || tok == "--output" {
                 if let Some(next) = tokens.get(i + 1) {
                     stdout = normalize_value(next.clone());
@@ -53,15 +60,32 @@ pub fn parse_sbatch_log_templates(script: &str) -> SbatchLogTemplates {
                     continue;
                 }
             }
+            if tok == "-J" || tok == "--job-name" {
+                if let Some(next) = tokens.get(i + 1) {
+                    job_name = normalize_value(next.clone());
+                    i += 2;
+                    continue;
+                }
+            }
             i += 1;
         }
     }
 
-    SbatchLogTemplates { stdout, stderr }
+    SbatchLogTemplates {
+        stdout,
+        stderr,
+        job_name,
+    }
 }
 
-pub fn resolve_log_path(template: &str, remote_root: &str, scheduler_id: i64) -> String {
-    let expanded = expand_job_id_tokens(template, scheduler_id);
+pub fn resolve_log_path(
+    template: &str,
+    remote_root: &str,
+    scheduler_id: i64,
+    job_name: Option<&str>,
+    user_name: Option<&str>,
+) -> String {
+    let expanded = expand_log_tokens(template, scheduler_id, job_name, user_name);
     if Path::new(&expanded).is_absolute() {
         expanded
     } else {
@@ -90,9 +114,39 @@ fn normalize_value(value: String) -> Option<String> {
     }
 }
 
-fn expand_job_id_tokens(value: &str, scheduler_id: i64) -> String {
+fn expand_log_tokens(
+    value: &str,
+    scheduler_id: i64,
+    job_name: Option<&str>,
+    user_name: Option<&str>,
+) -> String {
     let id = scheduler_id.to_string();
-    value.replace("%j", &id).replace("%J", &id)
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => out.push('%'),
+            Some('j') | Some('J') | Some('A') => out.push_str(&id),
+            Some('x') => match job_name {
+                Some(name) => out.push_str(name),
+                None => out.push_str("%x"),
+            },
+            Some('u') => match user_name {
+                Some(name) => out.push_str(name),
+                None => out.push_str("%u"),
+            },
+            Some(other) => {
+                out.push('%');
+                out.push(other);
+            }
+            None => out.push('%'),
+        }
+    }
+    out
 }
 
 fn split_sbatch_args(input: &str) -> Vec<String> {
@@ -161,29 +215,53 @@ mod tests {
 #SBATCH --output=final.out
 #SBATCH -e first.err
 #SBATCH --error final.err
+#SBATCH -J first-name
+#SBATCH --job-name=final-name
 echo "hi"
 "#;
         let parsed = parse_sbatch_log_templates(script);
         assert_eq!(parsed.stdout.as_deref(), Some("final.out"));
         assert_eq!(parsed.stderr.as_deref(), Some("final.err"));
+        assert_eq!(parsed.job_name.as_deref(), Some("final-name"));
     }
 
     #[test]
     fn parse_sbatch_log_templates_handles_quotes() {
-        let script = r#"#SBATCH --output="logs/run %j.out""#;
+        let script = r#"#SBATCH --output="logs/run %j.out"
+#SBATCH --job-name="job name"
+"#;
         let parsed = parse_sbatch_log_templates(script);
         assert_eq!(parsed.stdout.as_deref(), Some("logs/run %j.out"));
+        assert_eq!(parsed.job_name.as_deref(), Some("job name"));
     }
 
     #[test]
     fn resolve_log_path_replaces_job_id_and_joins_relative() {
-        let path = resolve_log_path("logs/%j.out", "/remote/run", 42);
+        let path = resolve_log_path("logs/%j.out", "/remote/run", 42, None, None);
         assert_eq!(path, "/remote/run/logs/42.out");
     }
 
     #[test]
     fn resolve_log_path_keeps_absolute() {
-        let path = resolve_log_path("/var/log/slurm-%j.out", "/remote/run", 7);
+        let path = resolve_log_path("/var/log/slurm-%j.out", "/remote/run", 7, None, None);
         assert_eq!(path, "/var/log/slurm-7.out");
+    }
+
+    #[test]
+    fn resolve_log_path_expands_job_name_and_user() {
+        let path = resolve_log_path(
+            "logs/%x-%u-%j.out",
+            "/remote/run",
+            26,
+            Some("run-name"),
+            Some("ubuntu"),
+        );
+        assert_eq!(path, "/remote/run/logs/run-name-ubuntu-26.out");
+    }
+
+    #[test]
+    fn resolve_log_path_keeps_escaped_percent() {
+        let path = resolve_log_path("logs/%%-%j.out", "/remote/run", 5, None, None);
+        assert_eq!(path, "/remote/run/logs/%-5.out");
     }
 }

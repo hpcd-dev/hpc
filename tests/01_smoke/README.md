@@ -4,7 +4,7 @@ Quick smoke test for basic submit/logs/retrieve paths.
 
 Features covered:
 - job submit, list, get
-- stdout/stderr log parsing via SBATCH output/error
+- stdout/stderr log parsing via SBATCH output/error (%x/%u templates)
 - job logs (stdout and --err)
 - job ls and retrieve for result files
 
