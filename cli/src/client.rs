@@ -288,6 +288,21 @@ fn normalize_path(p: impl AsRef<Path>) -> PathBuf {
     out
 }
 
+fn resolve_retrieve_local_target(path: &str, local_base: &Path) -> PathBuf {
+    if Path::new(path).is_absolute() {
+        let normalized = normalize_path(Path::new(path));
+        match normalized.file_name() {
+            Some(name) => local_base.join(name),
+            None => local_base.to_path_buf(),
+        }
+    } else {
+        match Path::new(path).file_name() {
+            Some(name) => local_base.join(name),
+            None => local_base.to_path_buf(),
+        }
+    }
+}
+
 pub async fn send_job_retrieve(
     client: &mut AgentClient<Channel>,
     job_id: i64,
@@ -311,15 +326,7 @@ pub async fn send_job_retrieve(
         local_base = std::env::current_dir()?.join(local_base);
     }
     let local_path = local_base.to_string_lossy().into_owned();
-    let local_target = if Path::new(path).is_absolute() {
-        let normalized = normalize_path(Path::new(path));
-        match normalized.file_name() {
-            Some(name) => local_base.join(name),
-            None => local_base.clone(),
-        }
-    } else {
-        local_base.join(Path::new(path))
-    };
+    let local_target = resolve_retrieve_local_target(path, &local_base);
 
     let (tx_ans, rx_ans) = mpsc::channel::<RetrieveJobRequest>(16);
     let outbound = ReceiverStream::new(rx_ans);

@@ -164,7 +164,12 @@ def validate_python_stats(project_out):
 
 
 def validate_filter_tree(project_out):
-    results_file = project_out / "results" / "files.txt"
+    results_file = project_out / "files.txt"
+    if not results_file.is_file():
+        raise RuntimeError("filter_tree: files.txt not retrieved to output root")
+    legacy_path = project_out / "results" / "files.txt"
+    if legacy_path.exists():
+        raise RuntimeError("filter_tree: retrieve prefix was not stripped")
     raw_lines = results_file.read_text().splitlines()
     files = [line.strip().lstrip("./") for line in raw_lines if line.strip()]
 
@@ -191,16 +196,28 @@ def validate_filter_tree(project_out):
 
 
 def validate_binary_output(project_out, repo_root):
-    results_dir = project_out / "results"
-    bin_path = results_dir / "raw" / "random.bin"
-    sha_path = results_dir / "raw" / "random.sha256"
+    bin_path = project_out / "random.bin"
+    sha_path = project_out / "random.sha256"
+    if not bin_path.is_file():
+        raise RuntimeError("binary_output: random.bin not retrieved to output root")
+    if not sha_path.is_file():
+        raise RuntimeError("binary_output: random.sha256 not retrieved to output root")
+    legacy_bin = project_out / "results" / "raw" / "random.bin"
+    if legacy_bin.exists():
+        raise RuntimeError("binary_output: retrieve prefix was not stripped for random.bin")
     actual_hash = sha_path.read_text().split()[0]
     expected_hash = sha256_path(bin_path)
     if actual_hash != expected_hash:
         raise RuntimeError("binary_output: random.bin hash mismatch")
 
     sample_src = (repo_root / "tests/04_binary_output/data/sample.txt").read_text()
-    sample_copy = (results_dir / "text" / "sample_copy.txt").read_text()
+    sample_copy_path = project_out / "text" / "sample_copy.txt"
+    if not sample_copy_path.is_file():
+        raise RuntimeError("binary_output: text/sample_copy.txt not retrieved to output root")
+    legacy_sample = project_out / "results" / "text" / "sample_copy.txt"
+    if legacy_sample.exists():
+        raise RuntimeError("binary_output: retrieve prefix was not stripped for sample_copy.txt")
+    sample_copy = sample_copy_path.read_text()
     if sample_src != sample_copy:
         raise RuntimeError("binary_output: sample_copy.txt mismatch")
 
