@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Alex Sizykh
 
 use crate::agent::add_cluster::{
-    normalize_default_base_path, parse_add_cluster_host, parse_add_cluster_port, resolve_host_addr,
+    map_net_error, normalize_default_base_path, parse_add_cluster_host, parse_add_cluster_port,
+    resolve_host_addr,
 };
 use crate::agent::helpers::{
     build_sync_filters, db_host_record_to_api_unit_response, db_job_record_to_api_unit_response,
@@ -16,6 +17,7 @@ use crate::agent::types::{AgentSvcError, OutStream, SubmitOutStream};
 use crate::ssh::sh_escape;
 use crate::state::db::{Address, HostStoreError};
 use crate::util;
+use crate::util::reachability;
 use crate::util::remote_path::normalize_path;
 use proto::agent_server::Agent;
 use proto::{
@@ -978,9 +980,24 @@ impl Agent for AgentSvc {
             .map(db_host_record_to_api_unit_response)
             .collect();
 
-        for cluster in clusters.iter_mut() {
-            if self.sessions().is_connected(&cluster.name).await {
+        for (cluster, host) in clusters.iter_mut().zip(hosts.iter()) {
+            let reachable = match reachability::check_host_reachable(&host.address, host.port).await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    log::debug!(
+                        "reachability check failed name={} host={} error={err}",
+                        host.name,
+                        format_address(&host.address)
+                    );
+                    false
+                }
+            };
+            cluster.reachable = reachable;
+            if reachable && self.sessions().is_connected(&cluster.name).await {
                 cluster.connected = true;
+            } else {
+                cluster.connected = false;
             }
         }
         let connected_count = clusters.iter().filter(|cluster| cluster.connected).count();
@@ -1612,7 +1629,34 @@ impl Agent for AgentSvc {
         let audit_remote_addr = remote_addr.clone();
         let audit_name = name.clone();
         let audit_host_label = host_label.clone();
+        let reachability_addr = addr.clone();
+        let reachability_port = port;
         tokio::spawn(async move {
+            let reachable =
+                match reachability::check_host_reachable(&reachability_addr, reachability_port).await
+                {
+                    Ok(value) => value,
+                    Err(err) => {
+                        log::warn!(
+                            "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=reachability_failed error={err}"
+                        );
+                        let status = match &reachability_addr {
+                            Address::Hostname(hostname) => map_net_error(hostname, err),
+                            Address::Ip(_) => Status::aborted(error_codes::NETWORK_ERROR),
+                        };
+                        let _ = evt_tx.send(Err(status)).await;
+                        return;
+                    }
+                };
+            if !reachable {
+                log::warn!(
+                    "cluster_upsert failed remote_addr={audit_remote_addr} name={audit_name} host={audit_host_label} reason=host_unreachable"
+                );
+                let _ = evt_tx
+                    .send(Err(Status::aborted(error_codes::NETWORK_ERROR)))
+                    .await;
+                return;
+            }
             let sm = match sessions.get(&name).await {
                 Some(existing) if existing.matches_params(&ssh_params) => existing,
                 _ => Arc::new(crate::ssh::SessionManager::new(ssh_params)),

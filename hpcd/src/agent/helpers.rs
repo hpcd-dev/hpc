@@ -65,6 +65,7 @@ pub fn db_host_record_to_api_unit_response(hs: &HostRecord) -> ListClustersUnitR
         name: hs.name.to_owned(),
         accounting_available: hs.accounting_available,
         default_base_path: hs.default_base_path.to_owned(),
+        reachable: false,
     }
 }
 
@@ -77,5 +78,7 @@ pub fn db_job_record_to_api_unit_response(jr: &JobRecord) -> ListJobsUnitRespons
         finished_at: jr.finished_at.clone(),
         is_completed: jr.is_completed,
         terminal_state: jr.terminal_state.clone(),
+        local_path: jr.local_path.clone(),
+        remote_path: jr.remote_path.clone(),
     }
 }

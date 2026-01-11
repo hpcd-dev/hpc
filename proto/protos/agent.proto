@@ -172,6 +172,7 @@ message ListClustersUnitResponse {
   string name = 7;
   bool accounting_available = 8;
   optional string default_base_path = 9;
+  bool reachable = 10;
 }
 
 message ListJobsRequest {
@@ -198,6 +199,8 @@ message ListJobsUnitResponse {
   optional string finished_at = 5;
   bool is_completed = 6;
   optional string terminal_state = 7; // Scheduler terminal state when known (COMPLETED, FAILED)
+  string local_path = 8; // Local directory used for submission
+  string remote_path = 9; // Remote directory used for submission
 }
 
 message ListJobsResponse {

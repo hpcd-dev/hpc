@@ -18,16 +18,24 @@ pub enum NetError {
 }
 
 pub async fn lookup_first_addr(host: &str, port: u16) -> Result<SocketAddr, NetError> {
-    // 1) Map lookup errors to domain errors
-    let mut addrs = lookup_host((host, port))
+    lookup_addrs(host, port)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| NetError::NoAddrs(host.to_owned()))
+}
+
+pub async fn lookup_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, NetError> {
+    let addrs = lookup_host((host, port))
         .await
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => NetError::DnsNotFound(host.to_owned()),
             _ => NetError::Resolve(e),
         })?;
 
-    // 2) Take the first resolved address, or error if none
-    addrs
-        .next()
-        .ok_or_else(|| NetError::NoAddrs(host.to_owned()))
+    let out: Vec<SocketAddr> = addrs.collect();
+    if out.is_empty() {
+        return Err(NetError::NoAddrs(host.to_owned()));
+    }
+    Ok(out)
 }
