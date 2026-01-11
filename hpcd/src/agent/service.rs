@@ -14,6 +14,14 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tonic::Status;
 
+fn parse_squeue_state(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|state| state.to_ascii_uppercase())
+}
+
 #[derive(Clone)]
 pub struct AgentSvc {
     sessions: Arc<SessionCache>,
@@ -124,14 +132,46 @@ impl AgentSvc {
                         continue;
                     }
                     let output = String::from_utf8_lossy(&out);
-                    let terminal_state = match crate::agent::slurm::sacct_terminal_state(&output) {
-                        Some(v) => v,
+                    match crate::agent::slurm::sacct_terminal_state(&output) {
+                        Some(v) => {
+                            completed_ids.push((job.id, Some(v)));
+                            continue;
+                        }
                         None => {
-                            log::debug!("sacct returned no terminal state for {name} job {job_id}");
+                            log::debug!(
+                                "sacct returned no terminal state for {name} job {job_id}"
+                            );
+                        }
+                    };
+
+                    let command = format!("squeue -j {job_id} -h -o %T");
+                    let (out, err, code) = match sm.exec_capture(&command).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::warn!("squeue check failed on {name} for {job_id}: {e}");
                             continue;
                         }
                     };
-                    completed_ids.push((job.id, Some(terminal_state)));
+                    if code != 0 {
+                        log::warn!(
+                            "squeue returned {} on {name} for {job_id}: {}",
+                            code,
+                            String::from_utf8_lossy(&err)
+                        );
+                        continue;
+                    }
+                    let output = String::from_utf8_lossy(&out);
+                    if let Some(state) = parse_squeue_state(&output) {
+                        if let Err(e) = self
+                            .hosts
+                            .update_job_scheduler_state(job.id, Some(&state))
+                            .await
+                        {
+                            log::warn!(
+                                "failed to update scheduler state for {name} job {job_id}: {e}"
+                            );
+                        }
+                    }
                 } else {
                     let command = format!("scontrol show job {job_id} -o");
                     match sm.exec_capture(&command).await {
@@ -142,6 +182,15 @@ impl AgentSvc {
                                     crate::agent::slurm::scontrol_job_state(&output)
                                 {
                                     if crate::agent::slurm::slurm_state_is_active(&state) {
+                                        if let Err(e) = self
+                                            .hosts
+                                            .update_job_scheduler_state(job.id, Some(&state))
+                                            .await
+                                        {
+                                            log::warn!(
+                                                "failed to update scheduler state for {name} job {job_id}: {e}"
+                                            );
+                                        }
                                         continue;
                                     }
                                     if crate::agent::slurm::slurm_state_is_terminal(&state) {
@@ -169,7 +218,7 @@ impl AgentSvc {
                         }
                     }
 
-                    let command = format!("squeue -j {job_id} -h -o %i");
+                    let command = format!("squeue -j {job_id} -h -o %T");
                     let (out, err, code) = match sm.exec_capture(&command).await {
                         Ok(v) => v,
                         Err(e) => {
@@ -186,7 +235,17 @@ impl AgentSvc {
                         continue;
                     }
                     let output = String::from_utf8_lossy(&out);
-                    if output.trim().is_empty() {
+                    if let Some(state) = parse_squeue_state(&output) {
+                        if let Err(e) = self
+                            .hosts
+                            .update_job_scheduler_state(job.id, Some(&state))
+                            .await
+                        {
+                            log::warn!(
+                                "failed to update scheduler state for {name} job {job_id}: {e}"
+                            );
+                        }
+                    } else {
                         completed_ids.push((job.id, None));
                     }
                 }

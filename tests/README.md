@@ -8,6 +8,7 @@ Projects overview:
 - 02_python_stats: sbatch script in subdir, data sync, output files, JSON/text results.
 - 03_filter_tree: include/exclude sync filters, file tree listing, filter ordering.
 - 04_binary_output: binary artifacts, nested outputs, retrieval of files and directories.
+- 05_queued_state: job held in PENDING to exercise queued status.
 
 Common workflow (replace <cluster> and <job_id>):
 - hpc job submit <cluster> tests/01_smoke

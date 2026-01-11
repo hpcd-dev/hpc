@@ -53,6 +53,7 @@ pub fn job_to_json(item: &ListJobsUnitResponse) -> serde_json::Value {
         "status": status,
         "is_completed": item.is_completed,
         "terminal_state": item.terminal_state.as_deref(),
+        "scheduler_state": item.scheduler_state.as_deref(),
         "created_at": item.created_at.as_str(),
         "finished_at": item.finished_at.as_deref(),
         "scheduler_id": item.scheduler_id,
@@ -290,6 +291,14 @@ pub fn format_job_details_json(item: &ListJobsUnitResponse) -> anyhow::Result<St
 
 pub fn job_status(item: &ListJobsUnitResponse) -> &'static str {
     if !item.is_completed {
+        if item
+            .scheduler_state
+            .as_deref()
+            .map(|state| state.eq_ignore_ascii_case("PENDING"))
+            .unwrap_or(false)
+        {
+            return "queued";
+        }
         return "running";
     }
     match item.terminal_state.as_deref() {
@@ -319,7 +328,11 @@ mod tests {
         }
     }
 
-    fn sample_job(completed: bool, terminal_state: Option<&str>) -> ListJobsUnitResponse {
+    fn sample_job(
+        completed: bool,
+        terminal_state: Option<&str>,
+        scheduler_state: Option<&str>,
+    ) -> ListJobsUnitResponse {
         ListJobsUnitResponse {
             name: "cluster-a".to_string(),
             job_id: 42,
@@ -328,6 +341,7 @@ mod tests {
             finished_at: Some("2024-01-01T01:00:00Z".to_string()),
             is_completed: completed,
             terminal_state: terminal_state.map(|s| s.to_string()),
+            scheduler_state: scheduler_state.map(|s| s.to_string()),
             local_path: "/tmp/project".to_string(),
             remote_path: "/remote/project".to_string(),
         }
@@ -358,12 +372,14 @@ mod tests {
 
     #[test]
     fn job_status_reports_running_and_terminal_states() {
-        let running = sample_job(false, None);
-        let completed = sample_job(true, Some("COMPLETED"));
-        let failed = sample_job(true, Some("FAILED"));
-        let completed_unknown = sample_job(true, None);
+        let running = sample_job(false, None, None);
+        let queued = sample_job(false, None, Some("PENDING"));
+        let completed = sample_job(true, Some("COMPLETED"), None);
+        let failed = sample_job(true, Some("FAILED"), None);
+        let completed_unknown = sample_job(true, None, None);
 
         assert_eq!(job_status(&running), "running");
+        assert_eq!(job_status(&queued), "queued");
         assert_eq!(job_status(&completed), "completed");
         assert_eq!(job_status(&failed), "failed");
         assert_eq!(job_status(&completed_unknown), "completed");
@@ -385,7 +401,7 @@ mod tests {
 
     #[test]
     fn format_jobs_table_includes_headers_and_rows() {
-        let job = sample_job(true, Some("COMPLETED"));
+        let job = sample_job(true, Some("COMPLETED"), None);
         let output = format_jobs_table(&[job]);
         assert!(output.contains("job id"));
         assert!(output.contains("cluster-a"));

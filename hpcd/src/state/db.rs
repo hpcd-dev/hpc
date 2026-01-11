@@ -183,6 +183,7 @@ pub struct JobRecord {
     pub finished_at: Option<String>,
     pub is_completed: bool,
     pub terminal_state: Option<String>,
+    pub scheduler_state: Option<String>,
     pub local_path: String,
     pub remote_path: String,
     pub stdout_path: String,
@@ -394,7 +395,8 @@ impl HostStore {
             is_completed boolean default 0,
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             completed_at text,
-            terminal_state text);
+            terminal_state text,
+            scheduler_state text);
     "#,
         )
         .execute(&self.pool)
@@ -403,6 +405,7 @@ impl HostStore {
             .fetch_all(&self.pool)
             .await?;
         let mut has_terminal_state = false;
+        let mut has_scheduler_state = false;
         let mut has_stdout_path = false;
         let mut has_stderr_path = false;
         let mut stderr_notnull = false;
@@ -413,6 +416,7 @@ impl HostStore {
                 .unwrap_or_default();
             match name.as_str() {
                 "terminal_state" => has_terminal_state = true,
+                "scheduler_state" => has_scheduler_state = true,
                 "stdout_path" => has_stdout_path = true,
                 "stderr_path" => {
                     has_stderr_path = true;
@@ -424,6 +428,11 @@ impl HostStore {
         }
         if !has_terminal_state {
             sqlx::query("ALTER TABLE jobs ADD COLUMN terminal_state TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        if !has_scheduler_state {
+            sqlx::query("ALTER TABLE jobs ADD COLUMN scheduler_state TEXT")
                 .execute(&self.pool)
                 .await?;
         }
@@ -458,7 +467,8 @@ impl HostStore {
                   is_completed boolean default 0,
                   created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                   completed_at text,
-                  terminal_state text
+                  terminal_state text,
+                  scheduler_state text
                 );
                 "#,
             )
@@ -469,12 +479,12 @@ impl HostStore {
                 INSERT INTO jobs_new (
                   id, scheduler_id, host_id, local_path, remote_path,
                   stdout_path, stderr_path, is_completed,
-                  created_at, completed_at, terminal_state
+                  created_at, completed_at, terminal_state, scheduler_state
                 )
                 SELECT
                   id, scheduler_id, host_id, local_path, remote_path,
                   COALESCE(stdout_path, ''), stderr_path, is_completed,
-                  created_at, completed_at, terminal_state
+                  created_at, completed_at, terminal_state, scheduler_state
                 FROM jobs;
                 "#,
             )
@@ -894,7 +904,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs where host_id = ?1
             )
-            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,aj.stdout_path as stdout_path,aj.stderr_path as stderr_path,h.name as name
+            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.scheduler_state as scheduler_state,aj.local_path as local_path,aj.remote_path as remote_path,aj.stdout_path as stdout_path,aj.stderr_path as stderr_path,h.name as name
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -914,6 +924,7 @@ impl HostStore {
                    aj.created_at as created_at,
                    aj.completed_at as completed_at,
                    aj.terminal_state as terminal_state,
+                   aj.scheduler_state as scheduler_state,
                    aj.local_path as local_path,
                    aj.remote_path as remote_path,
                    aj.stdout_path as stdout_path,
@@ -936,7 +947,7 @@ impl HostStore {
             with all_jobs as (
                 select * from jobs
             )
-            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,aj.stdout_path as stdout_path,aj.stderr_path as stderr_path,h.name as name
+            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.scheduler_state as scheduler_state,aj.local_path as local_path,aj.remote_path as remote_path,aj.stdout_path as stdout_path,aj.stderr_path as stderr_path,h.name as name
             from all_jobs aj
             join hosts h
               on aj.host_id = h.id;
@@ -950,7 +961,7 @@ impl HostStore {
     pub async fn list_running_jobs(&self) -> Result<Vec<JobRecord>> {
         let rows = sqlx::query(
             r#"
-            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.local_path as local_path,aj.remote_path as remote_path,aj.stdout_path as stdout_path,aj.stderr_path as stderr_path,h.name as name
+            select aj.id as id, aj.scheduler_id as scheduler_id,aj.is_completed as is_completed,aj.created_at as created_at,aj.completed_at as completed_at,aj.terminal_state as terminal_state,aj.scheduler_state as scheduler_state,aj.local_path as local_path,aj.remote_path as remote_path,aj.stdout_path as stdout_path,aj.stderr_path as stderr_path,h.name as name
             from jobs aj
             join hosts h
               on aj.host_id = h.id
@@ -969,12 +980,33 @@ impl HostStore {
             update jobs
             set is_completed = 1,
                 completed_at = ?1,
-                terminal_state = ?2
-            where id = ?3
+                terminal_state = ?2,
+                scheduler_state = ?3
+            where id = ?4
             "#,
         )
         .bind(now)
         .bind(terminal_state)
+        .bind(terminal_state)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_job_scheduler_state(
+        &self,
+        id: i64,
+        scheduler_state: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            update jobs
+            set scheduler_state = ?1
+            where id = ?2
+            "#,
+        )
+        .bind(scheduler_state)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -1053,6 +1085,7 @@ fn row_to_job(row: sqlx::sqlite::SqliteRow) -> JobRecord {
         finished_at: row.try_get("completed_at").unwrap(),
         is_completed: row.try_get("is_completed").unwrap(),
         terminal_state: row.try_get("terminal_state").unwrap(),
+        scheduler_state: row.try_get("scheduler_state").unwrap(),
         local_path: row.try_get("local_path").unwrap(),
         remote_path: row.try_get("remote_path").unwrap(),
         stdout_path: row.try_get("stdout_path").unwrap(),
@@ -1328,6 +1361,7 @@ mod tests {
         assert!(!got.is_completed);
         assert!(got.finished_at.is_none());
         assert!(got.terminal_state.is_none());
+        assert!(got.scheduler_state.is_none());
         assert!(!got.created_at.is_empty());
     }
 
@@ -1394,6 +1428,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_job_scheduler_state_persists_value() {
+        let db = HostStore::open_memory().await.unwrap();
+        let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
+        db.insert_host(&host).await.unwrap();
+
+        let host_row = db.get_by_name("host-a").await.unwrap().unwrap();
+        let job = NewJob {
+            scheduler_id: Some(42),
+            host_id: host_row.id,
+            local_path: "/tmp/local-a".into(),
+            remote_path: "/remote/run-a".into(),
+            stdout_path: "/remote/run-a/slurm-42.out".into(),
+            stderr_path: Some("/remote/run-a/slurm-42.out".into()),
+        };
+        let job_id = db.insert_job(&job).await.unwrap();
+
+        db.update_job_scheduler_state(job_id, Some("PENDING"))
+            .await
+            .unwrap();
+
+        let got = db.get_job_by_job_id(job_id).await.unwrap().unwrap();
+        assert_eq!(got.scheduler_state.as_deref(), Some("PENDING"));
+    }
+
+    #[tokio::test]
     async fn list_running_jobs_skips_completed_jobs() {
         let db = HostStore::open_memory().await.unwrap();
         let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
@@ -1432,5 +1491,6 @@ mod tests {
         assert!(completed.is_completed);
         assert!(completed.finished_at.is_some());
         assert_eq!(completed.terminal_state.as_deref(), Some("FAILED"));
+        assert_eq!(completed.scheduler_state.as_deref(), Some("FAILED"));
     }
 }

@@ -201,6 +201,7 @@ message ListJobsUnitResponse {
   optional string terminal_state = 7; // Scheduler terminal state when known (COMPLETED, FAILED)
   string local_path = 8; // Local directory used for submission
   string remote_path = 9; // Remote directory used for submission
+  optional string scheduler_state = 10; // Scheduler state when known (PENDING, RUNNING)
 }
 
 message ListJobsResponse {

@@ -78,6 +78,7 @@ pub fn db_job_record_to_api_unit_response(jr: &JobRecord) -> ListJobsUnitRespons
         finished_at: jr.finished_at.clone(),
         is_completed: jr.is_completed,
         terminal_state: jr.terminal_state.clone(),
+        scheduler_state: jr.scheduler_state.clone(),
         local_path: jr.local_path.clone(),
         remote_path: jr.remote_path.clone(),
     }
