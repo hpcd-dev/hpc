@@ -120,6 +120,69 @@ fn is_sftp_missing_path(err: &anyhow::Error) -> bool {
     })
 }
 
+fn resolve_retrieve_local_target(
+    path: &str,
+    remote_path: &str,
+    local_base: &Path,
+    path_is_absolute: bool,
+) -> Option<PathBuf> {
+    if path_is_absolute {
+        Path::new(remote_path)
+            .file_name()
+            .map(|name| local_base.join(name))
+    } else {
+        match Path::new(path).file_name() {
+            Some(name) => Some(local_base.join(name)),
+            None => Some(local_base.to_path_buf()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_retrieve_local_target;
+    use std::path::Path;
+
+    #[test]
+    fn retrieve_local_target_strips_prefix_for_relative_file() {
+        let base = Path::new("local");
+        let target = resolve_retrieve_local_target(
+            "results/result.txt",
+            "/remote/results/result.txt",
+            base,
+            false,
+        )
+        .expect("target");
+        assert_eq!(target, base.join("result.txt"));
+    }
+
+    #[test]
+    fn retrieve_local_target_strips_prefix_for_relative_dir() {
+        let base = Path::new("local");
+        let target = resolve_retrieve_local_target(
+            "results/nested/out",
+            "/remote/results/nested/out",
+            base,
+            false,
+        )
+        .expect("target");
+        assert_eq!(target, base.join("out"));
+    }
+
+    #[test]
+    fn retrieve_local_target_uses_basename_for_absolute_path() {
+        let base = Path::new("local");
+        let target = resolve_retrieve_local_target(
+            "/remote/results/output.log",
+            "/remote/results/output.log",
+            base,
+            true,
+        )
+        .expect("target");
+        assert_eq!(target, base.join("output.log"));
+    }
+}
+
 fn is_local_path_conflict(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         let Some(io_err) = cause.downcast_ref::<std::io::Error>() else {
@@ -621,8 +684,14 @@ impl Agent for AgentSvc {
                 }
             }
 
-            let local_target = if path_is_absolute {
-                let Some(name) = std::path::Path::new(&remote_path).file_name() else {
+            let local_target = match resolve_retrieve_local_target(
+                &path,
+                &remote_path,
+                &local_base,
+                path_is_absolute,
+            ) {
+                Some(target) => target,
+                None => {
                     log::warn!(
                         "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=invalid_remote_path"
                     );
@@ -634,10 +703,7 @@ impl Agent for AgentSvc {
                         }))
                         .await;
                     return;
-                };
-                local_base.join(name)
-            } else {
-                local_base.join(std::path::Path::new(&path))
+                }
             };
 
             if let Err(err) = mgr
