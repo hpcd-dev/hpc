@@ -530,13 +530,14 @@ impl Agent for AgentSvc {
             })?
             .ok_or_else(|| Status::invalid_argument(error_codes::INVALID_ARGUMENT))?;
 
-        let (job_id, path, local_path, overwrite) = match init.msg {
+        let (job_id, path, local_path, overwrite, force) = match init.msg {
             Some(proto::retrieve_job_request::Msg::Init(RetrieveJobRequestInit {
                 job_id,
                 path,
                 local_path,
                 overwrite,
-            })) => (job_id, path, local_path, overwrite),
+                force,
+            })) => (job_id, path, local_path, overwrite, force),
             _ => {
                 return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT));
             }
@@ -580,7 +581,7 @@ impl Agent for AgentSvc {
         let audit_remote_addr = remote_addr.clone();
 
         tokio::spawn(async move {
-            let (name, run_path) = {
+            let (name, run_path, is_completed, terminal_state) = {
                 let job = match hs.get_job_by_job_id(job_id).await {
                     Ok(Some(v)) => v,
                     Ok(None) => {
@@ -611,8 +612,60 @@ impl Agent for AgentSvc {
                         return;
                     }
                 };
-                (job.name.clone(), job.remote_path.clone())
+                (
+                    job.name.clone(),
+                    job.remote_path.clone(),
+                    job.is_completed,
+                    job.terminal_state.clone(),
+                )
             };
+
+            if !is_completed && !force {
+                log::warn!(
+                    "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=job_not_completed"
+                );
+                let message = format!(
+                    "Job {job_id} is not completed; use --force to retrieve anyway.\n"
+                );
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Stderr(message.into_bytes())),
+                    }))
+                    .await;
+                let _ = evt_tx
+                    .send(Ok(StreamEvent {
+                        event: Some(stream_event::Event::Error(
+                            error_codes::CONFLICT.to_string(),
+                        )),
+                    }))
+                    .await;
+                return;
+            }
+            if !force {
+                if let Some(state) = terminal_state.as_deref() {
+                    if !state.eq_ignore_ascii_case("COMPLETED") {
+                        log::warn!(
+                            "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=job_failed terminal_state={state}"
+                        );
+                        let message = format!(
+                            "Job {job_id} did not complete successfully; use --force to retrieve anyway.\n"
+                        );
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Stderr(message.into_bytes())),
+                            }))
+                            .await;
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(
+                                    error_codes::CONFLICT.to_string(),
+                                )),
+                            }))
+                            .await;
+                        return;
+                    }
+                }
+            }
 
             let mgr = match svc.get_sessionmanager(&name).await {
                 Ok(v) => v,

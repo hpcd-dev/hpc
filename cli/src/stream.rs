@@ -439,6 +439,12 @@ where
                 if let Some(spinner) = spinner.take() {
                     spinner.stop(None).await;
                 }
+                if let Some(failure) = parse_remote_path_failure(status.message()) {
+                    print_with_red_cross_stderr(&format!(
+                        "Remote path: {} - {}",
+                        failure.remote_path, failure.reason
+                    ))?;
+                }
                 eprintln!("{}", format_status_error(&status));
                 exit_code = Some(1);
                 break;
@@ -532,8 +538,99 @@ pub fn print_with_green_check_stderr(message: &str) -> anyhow::Result<()> {
     write_stderr_with_green_ticks(line.as_bytes())
 }
 
+pub fn print_with_red_cross_stderr(message: &str) -> anyhow::Result<()> {
+    let mut line = String::from("✗ ");
+    line.push_str(message);
+    line.push('\n');
+    write_stderr_with_red_crosses(line.as_bytes())
+}
+
 fn write_all<W: Write>(w: &mut W, buf: &[u8]) -> anyhow::Result<()> {
     w.write_all(buf)?;
     w.flush()?;
     Ok(())
+}
+
+fn write_stderr_with_red_crosses(bytes: &[u8]) -> anyhow::Result<()> {
+    let mut stderr = std::io::stderr();
+    if !stderr.is_terminal() {
+        return write_all(&mut stderr, bytes);
+    }
+    let text = match std::str::from_utf8(bytes) {
+        Ok(v) => v,
+        Err(_) => return write_all(&mut stderr, bytes),
+    };
+    if !text.contains('✗') {
+        return write_all(&mut stderr, bytes);
+    }
+    for line in text.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix('✗') {
+            execute!(
+                stderr,
+                SetForegroundColor(Color::Red),
+                Print("✗"),
+                ResetColor,
+                Print(rest)
+            )?;
+        } else {
+            write_all(&mut stderr, line.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+pub struct RemotePathFailure<'a> {
+    pub remote_path: &'a str,
+    pub reason: &'static str,
+}
+
+const REMOTE_PATH_IN_USE_REASON: &str = "in use by another job";
+const REMOTE_PATH_IN_USE_INFIX: &str = " is still running in ";
+const REMOTE_PATH_IN_USE_SUFFIX: &str = "; use --force to submit anyway";
+
+pub fn parse_remote_path_failure(message: &str) -> Option<RemotePathFailure<'_>> {
+    // Add new directory-related submit error parsers here.
+    parse_remote_path_in_use(message).map(|remote_path| RemotePathFailure {
+        remote_path,
+        reason: REMOTE_PATH_IN_USE_REASON,
+    })
+}
+
+fn parse_remote_path_in_use(message: &str) -> Option<&str> {
+    if !message.starts_with("job ") {
+        return None;
+    }
+    let (_, rest) = message.split_once(REMOTE_PATH_IN_USE_INFIX)?;
+    let (remote_path, _) = rest.split_once(REMOTE_PATH_IN_USE_SUFFIX)?;
+    let remote_path = remote_path.trim();
+    if remote_path.is_empty() {
+        None
+    } else {
+        Some(remote_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_remote_path_failure, parse_remote_path_in_use, REMOTE_PATH_IN_USE_REASON};
+
+    #[test]
+    fn parse_remote_path_in_use_extracts_path() {
+        let message = "job 42 is still running in /scratch/run; use --force to submit anyway";
+        assert_eq!(parse_remote_path_in_use(message), Some("/scratch/run"));
+    }
+
+    #[test]
+    fn parse_remote_path_failure_maps_reason() {
+        let message = "job 7 is still running in /data/run; use --force to submit anyway";
+        let failure = parse_remote_path_failure(message).expect("expected failure");
+        assert_eq!(failure.remote_path, "/data/run");
+        assert_eq!(failure.reason, REMOTE_PATH_IN_USE_REASON);
+    }
+
+    #[test]
+    fn parse_remote_path_in_use_rejects_non_matching_message() {
+        let message = "conflict";
+        assert!(parse_remote_path_in_use(message).is_none());
+    }
 }
