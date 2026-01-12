@@ -18,17 +18,18 @@
 
 `hpc` provides a local-first interface to Slurm over SSH.
 
-It allows you to do supercomputing from the comfort of your local development environment. 
+
+Here's a short demo showcasing the basic flow of `hpc`:
+[![asciicast](https://asciinema.org/a/00nj8QnJOYamcUvI.svg)](https://asciinema.org/a/00nj8QnJOYamcUvI)
+
+## Introduction
+
+`hpc` allows you to do supercomputing from the comfort of your local development environment. 
 
 - **Add a cluster**: just tell `hpc` how to connect to a cluster over SSH, and it will handle the rest for you.
 - **Submit a job**: `hpc` will handle for you where the submitted code and data will go and 
 - **Retrieve the results**: `hpc` provides a simple and intuitive way to check the job's results and retrieve them once they're ready
 - **Everything over SSH**: the best part is - `hpc` does everything over SSH!
-
-
-## Demo
-Here's a short demo showcasing the basic flow of hpc:
-[![asciicast](https://asciinema.org/a/00nj8QnJOYamcUvI.svg)](https://asciinema.org/a/00nj8QnJOYamcUvI)
 
 ## Quickstart
 
