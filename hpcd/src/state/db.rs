@@ -898,6 +898,28 @@ impl HostStore {
         Ok(row.map(|r| r.try_get::<String, _>("remote_path").unwrap()))
     }
 
+    pub async fn running_job_id_for_remote_path(
+        &self,
+        host_name: &str,
+        remote_path: &str,
+    ) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            r#"
+            select j.id as id
+            from jobs j
+            join hosts h on j.host_id = h.id
+            where h.name = ?1 and j.remote_path = ?2 and j.is_completed = 0
+            order by j.id desc
+            limit 1
+            "#,
+        )
+        .bind(host_name)
+        .bind(remote_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.try_get::<i64, _>("id").unwrap()))
+    }
+
     pub async fn list_jobs_for_host(&self, host_id: i64) -> Result<Vec<JobRecord>> {
         let rows = sqlx::query(
             r#"
@@ -1402,6 +1424,40 @@ mod tests {
             .await
             .unwrap();
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn running_job_id_for_remote_path_filters_completed() {
+        let db = HostStore::open_memory().await.unwrap();
+        let host = make_host("host-a", "alice", Address::Hostname("node-a".into()));
+        db.insert_host(&host).await.unwrap();
+
+        let host_row = db.get_by_name("host-a").await.unwrap().unwrap();
+        let job = NewJob {
+            scheduler_id: Some(200),
+            host_id: host_row.id,
+            local_path: "/tmp/project".into(),
+            remote_path: "/remote/run".into(),
+            stdout_path: "/remote/run/slurm-200.out".into(),
+            stderr_path: None,
+        };
+        let job_id = db.insert_job(&job).await.unwrap();
+
+        let running = db
+            .running_job_id_for_remote_path("host-a", "/remote/run")
+            .await
+            .unwrap();
+        assert_eq!(running, Some(job_id));
+
+        db.mark_job_completed(job_id, Some("COMPLETED"))
+            .await
+            .unwrap();
+
+        let running = db
+            .running_job_id_for_remote_path("host-a", "/remote/run")
+            .await
+            .unwrap();
+        assert!(running.is_none());
     }
 
     #[tokio::test]

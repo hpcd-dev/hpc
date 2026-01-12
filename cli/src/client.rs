@@ -446,7 +446,8 @@ pub async fn send_submit(
     name: &str,
     local_path: &str,
     remote_path: &Option<String>,
-    force_new_directory: bool,
+    new_directory: bool,
+    force: bool,
     sbatchscript: &str,
     filters: &[SubmitPathFilterRule],
 ) -> anyhow::Result<()> {
@@ -461,7 +462,8 @@ pub async fn send_submit(
                 name: name.to_owned(),
                 sbatchscript: sbatchscript.to_owned(),
                 filters: filters.to_vec(),
-                force_new_directory,
+                new_directory,
+                force,
             })),
         })
         .await?;

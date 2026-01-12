@@ -194,7 +194,10 @@ pub struct SubmitArgs {
     pub remote_path: Option<String>,
     /// Always create a new remote directory, even if this local path was submitted before.
     #[arg(long)]
-    pub force_new_directory: bool,
+    pub new_directory: bool,
+    /// Allow submitting into a remote directory even if another job is running there.
+    #[arg(long)]
+    pub force: bool,
     /// Include paths matching PATTERN.
     /// Rules are checked in the order they appear across --include/--exclude;
     /// the first match wins, and unmatched paths are included.
