@@ -5,7 +5,8 @@ use crate::errors::{format_server_error, format_status_error};
 use crate::mfa::{clear_transient_mfa, collect_mfa_answers, collect_mfa_answers_transient};
 use crate::stream::{
     MinDurationSpinner, Spinner, SubmitStreamOutcome, ensure_exit_code, handle_stream_events,
-    handle_stream_events_with_progress, handle_submit_stream_events, print_with_green_check_stderr,
+    handle_stream_events_with_progress, handle_submit_stream_events, parse_remote_path_failure,
+    print_with_green_check_stderr, print_with_red_cross_stderr,
 };
 use anyhow::bail;
 use proto::agent_client::AgentClient;
@@ -470,10 +471,18 @@ pub async fn send_submit(
         })
         .await?;
     // Start Submit RPC
-    let response = client
-        .submit(Request::new(outbound))
-        .await
-        .map_err(|status| anyhow::Error::msg(format_status_error(&status)))?;
+    let response = match client.submit(Request::new(outbound)).await {
+        Ok(response) => response,
+        Err(status) => {
+            if let Some(failure) = parse_remote_path_failure(status.message()) {
+                print_with_red_cross_stderr(&format!(
+                    "Remote path: {} - {}",
+                    failure.remote_path, failure.reason
+                ))?;
+            }
+            return Err(anyhow::Error::msg(format_status_error(&status)));
+        }
+    };
     let inbound = response.into_inner();
     let tx_mfa = tx_ans.clone();
     let outcome = handle_submit_stream_events(inbound, move |answers| {
