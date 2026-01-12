@@ -80,16 +80,35 @@ def stop_daemon(proc, timeout_secs=10):
         proc.wait(timeout=timeout_secs)
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(text):
+    return ANSI_RE.sub("", text)
+
+
 def parse_job_id(output):
+    cleaned = strip_ansi(output)
     patterns = [
         r"Job\s+(\d+)\s+submitted",
         r"job get\s+(\d+)",
     ]
     for pattern in patterns:
-        match = re.search(pattern, output)
+        match = re.search(pattern, cleaned)
         if match:
             return int(match.group(1))
     raise RuntimeError("unable to parse job id from submit output")
+
+
+def parse_remote_path(output):
+    cleaned = strip_ansi(output)
+    for line in cleaned.splitlines():
+        if "Remote path:" in line:
+            _, _, path = line.partition("Remote path:")
+            path = path.strip()
+            if path:
+                return path
+    raise RuntimeError("unable to parse remote path from submit output")
 
 
 def job_status(hpc_cmd, job_id):
@@ -222,6 +241,21 @@ def validate_binary_output(project_out, repo_root):
         raise RuntimeError("binary_output: sample_copy.txt mismatch")
 
 
+def build_submit_cmd(hpc_cmd, cluster, project_path, submit_args, headless, extra_args=None):
+    cmd = hpc_cmd + [
+        "job",
+        "submit",
+        cluster,
+        str(project_path),
+    ]
+    cmd.extend(submit_args)
+    if extra_args:
+        cmd.extend(extra_args)
+    if headless:
+        cmd.append("--headless")
+    return cmd
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run hpc end-to-end test projects.")
     parser.add_argument("--cluster", required=True, help="Cluster name configured in hpc.")
@@ -328,36 +362,85 @@ def main():
         ]
 
         for project in projects:
-            cmd = hpc_cmd + [
-                "job",
-                "submit",
+            submit_cmd = build_submit_cmd(
+                hpc_cmd,
                 args.cluster,
-                str(project["path"]),
-            ]
-            cmd.extend(project["submit_args"])
-            if args.headless:
-                cmd.append("--headless")
-
-            result = run_cmd(cmd)
+                project["path"],
+                project["submit_args"],
+                args.headless,
+            )
+            result = run_cmd(submit_cmd)
             output = result.stdout + result.stderr
             job_id = parse_job_id(output)
-            print(f"{project['id']}: submitted job {job_id}")
+            job_ids = [job_id]
+            primary_job_id = job_id
+            if project["id"] == "01_smoke":
+                remote_path = parse_remote_path(output)
+                conflict_status, conflict_output = run_cmd_status(submit_cmd)
+                if conflict_status == 0:
+                    raise RuntimeError(
+                        "submit should fail while a job is running in the same directory"
+                    )
+                expected = f"job {job_id} is still running"
+                if expected not in conflict_output:
+                    raise RuntimeError(
+                        "submit conflict message missing running job id"
+                    )
 
-            wait_for_job(hpc_cmd, job_id, args.timeout, args.poll)
-            print(f"{project['id']}: job {job_id} completed")
+                force_cmd = build_submit_cmd(
+                    hpc_cmd,
+                    args.cluster,
+                    project["path"],
+                    project["submit_args"],
+                    args.headless,
+                    extra_args=["--force"],
+                )
+                force_result = run_cmd(force_cmd)
+                force_output = force_result.stdout + force_result.stderr
+                force_job_id = parse_job_id(force_output)
+                force_remote_path = parse_remote_path(force_output)
+                if force_remote_path != remote_path:
+                    raise RuntimeError(
+                        "force submit did not reuse existing remote path"
+                    )
+                job_ids.append(force_job_id)
+
+                new_dir_cmd = build_submit_cmd(
+                    hpc_cmd,
+                    args.cluster,
+                    project["path"],
+                    project["submit_args"],
+                    args.headless,
+                    extra_args=["--new-directory"],
+                )
+                new_dir_result = run_cmd(new_dir_cmd)
+                new_dir_output = new_dir_result.stdout + new_dir_result.stderr
+                new_dir_job_id = parse_job_id(new_dir_output)
+                new_dir_remote_path = parse_remote_path(new_dir_output)
+                if new_dir_remote_path == remote_path:
+                    raise RuntimeError(
+                        "new-directory submit did not create a new remote path"
+                    )
+                job_ids.append(new_dir_job_id)
+                primary_job_id = new_dir_job_id
+
+            for active_job_id in job_ids:
+                print(f"{project['id']}: submitted job {active_job_id}")
+                wait_for_job(hpc_cmd, active_job_id, args.timeout, args.poll)
+                print(f"{project['id']}: job {active_job_id} completed")
 
             if project["id"] == "01_smoke":
-                validate_smoke_logs(hpc_cmd, job_id)
+                validate_smoke_logs(hpc_cmd, primary_job_id)
                 print(f"{project['id']}: logs ok")
 
-            project_out = out_dir / project["id"] / str(job_id)
+            project_out = out_dir / project["id"] / str(primary_job_id)
             project_out.mkdir(parents=True, exist_ok=True)
 
             for path in project["retrieve"]:
                 retrieve_cmd = hpc_cmd + [
                     "job",
                     "retrieve",
-                    str(job_id),
+                    str(primary_job_id),
                     path,
                     "--output",
                     str(project_out),

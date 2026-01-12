@@ -1138,7 +1138,7 @@ impl Agent for AgentSvc {
             })?
             .ok_or_else(|| Status::invalid_argument(error_codes::INVALID_ARGUMENT))?;
 
-        let (local_path, remote_path, name, sbatchscript, filters, force_new_directory) =
+        let (local_path, remote_path, name, sbatchscript, filters, new_directory, force) =
             match init.msg {
                 Some(proto::submit_request::Msg::Init(i)) => (
                     i.local_path,
@@ -1146,7 +1146,8 @@ impl Agent for AgentSvc {
                     i.name,
                     i.sbatchscript,
                     i.filters,
-                    i.force_new_directory,
+                    i.new_directory,
+                    i.force,
                 ),
             _ => return Err(Status::invalid_argument(error_codes::INVALID_ARGUMENT)),
         };
@@ -1206,7 +1207,7 @@ impl Agent for AgentSvc {
         };
 
         let hs = self.hosts();
-        let reuse_remote_path = if remote_path.is_none() && !force_new_directory {
+        let reuse_remote_path = if remote_path.is_none() && !new_directory {
             match hs
                 .latest_remote_path_for_local_path(&name, &local_path)
                 .await
@@ -1266,6 +1267,29 @@ impl Agent for AgentSvc {
         log::info!(
             "submit resolved remote_addr={remote_addr} name={name} remote_path={remote_path}"
         );
+        if !force {
+            match hs
+                .running_job_id_for_remote_path(&name, &remote_path)
+                .await
+            {
+                Ok(Some(job_id)) => {
+                    log::warn!(
+                        "submit failed remote_addr={remote_addr} name={name} reason=remote_path_in_use job_id={job_id} remote_path={remote_path}"
+                    );
+                    let detail = format!(
+                        "job {job_id} is still running in {remote_path}; use --force to submit anyway"
+                    );
+                    return Err(Status::already_exists(detail));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!(
+                        "submit failed remote_addr={remote_addr} name={name} reason=job_lookup_failed error={e}"
+                    );
+                    return Err(Status::internal(error_codes::INTERNAL_ERROR));
+                }
+            }
+        }
 
         if evt_tx
             .send(Ok(SubmitStreamEvent {
