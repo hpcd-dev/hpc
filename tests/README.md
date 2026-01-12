@@ -1,14 +1,15 @@
 # Test Projects
 
-Lightweight projects for manual end-to-end testing on low-powered devices. Each project is small
-(typically seconds of runtime) and focuses on exercising multiple CLI/daemon features.
-The whole test suite takes less than 3 minutes 
+Lightweight projects for manual end-to-end testing on low-powered devices. Most projects are small
+(typically seconds of runtime) and focus on exercising multiple CLI/daemon features.
+The automated suite takes less than 3 minutes; 91_queued_state and 92_long_running_hashes are manual-only.
 Projects overview:
 - 01_smoke: basic submit, stdout/stderr logs, job ls, retrieve results.
 - 02_python_stats: sbatch script in subdir, data sync, output files, JSON/text results.
 - 03_filter_tree: include/exclude sync filters, file tree listing, filter ordering.
 - 04_binary_output: binary artifacts, nested outputs, retrieval of files and directories.
-- 05_queued_state: job held in PENDING to exercise queued status.
+- 91_queued_state: job held in PENDING to exercise queued status.
+- 92_long_running_hashes: ~100 MiB data sync with sequential hashing (manual-only).
 
 Common workflow (replace <cluster> and <job_id>):
 - hpc job submit <cluster> tests/01_smoke

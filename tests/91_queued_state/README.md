@@ -1,4 +1,4 @@
-# 05_queued_state
+# 91_queued_state
 
 Induces a queued (PENDING) job state so the CLI can show "queued".
 
@@ -6,7 +6,7 @@ The sbatch script sets a future start time via `--begin`, which should keep the
 job pending until the time window opens.
 
 Suggested commands:
-- hpc job submit <cluster> tests/05_queued_state
+- hpc job submit <cluster> tests/91_queued_state
 - hpc job list
 - hpc job get <job_id>
 

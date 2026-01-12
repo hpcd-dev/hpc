@@ -581,7 +581,7 @@ impl Agent for AgentSvc {
         let audit_remote_addr = remote_addr.clone();
 
         tokio::spawn(async move {
-            let (name, run_path, is_completed) = {
+            let (name, run_path, is_completed, terminal_state) = {
                 let job = match hs.get_job_by_job_id(job_id).await {
                     Ok(Some(v)) => v,
                     Ok(None) => {
@@ -612,7 +612,12 @@ impl Agent for AgentSvc {
                         return;
                     }
                 };
-                (job.name.clone(), job.remote_path.clone(), job.is_completed)
+                (
+                    job.name.clone(),
+                    job.remote_path.clone(),
+                    job.is_completed,
+                    job.terminal_state.clone(),
+                )
             };
 
             if !is_completed && !force {
@@ -635,6 +640,31 @@ impl Agent for AgentSvc {
                     }))
                     .await;
                 return;
+            }
+            if !force {
+                if let Some(state) = terminal_state.as_deref() {
+                    if !state.eq_ignore_ascii_case("COMPLETED") {
+                        log::warn!(
+                            "retrieve_job failed remote_addr={audit_remote_addr} job_id={job_id} name={name} reason=job_failed terminal_state={state}"
+                        );
+                        let message = format!(
+                            "Job {job_id} did not complete successfully; use --force to retrieve anyway.\n"
+                        );
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Stderr(message.into_bytes())),
+                            }))
+                            .await;
+                        let _ = evt_tx
+                            .send(Ok(StreamEvent {
+                                event: Some(stream_event::Event::Error(
+                                    error_codes::CONFLICT.to_string(),
+                                )),
+                            }))
+                            .await;
+                        return;
+                    }
+                }
             }
 
             let mgr = match svc.get_sessionmanager(&name).await {
