@@ -86,6 +86,7 @@ message RetrieveJobRequestInit {
   string path = 3; // remote path (absolute or relative to run folder)
   optional string local_path = 4; // local destination base path
   bool overwrite = 5; // overwrite existing local files
+  bool force = 6; // allow retrieving before a job is complete
 }
 
 message RetrieveJobRequest {

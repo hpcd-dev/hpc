@@ -101,6 +101,8 @@ pub struct JobRetrieveArgs {
     pub output: Option<PathBuf>,
     #[arg(long, help = "Overwrite existing local files.")]
     pub overwrite: bool,
+    #[arg(long, help = "Retrieve outputs even if the job has not completed.")]
+    pub force: bool,
     #[arg(long)]
     pub headless: bool,
 }
@@ -240,4 +242,34 @@ pub struct AddClusterArgs {
     /// Disable prompts; missing values must have defaults or the command will fail.
     #[arg(long)]
     pub headless: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn job_retrieve_force_defaults_to_false() {
+        let args = Cli::parse_from(["hpc", "job", "retrieve", "12", "output.txt"]);
+        match args.cmd {
+            Cmd::Job(job) => match job.cmd {
+                JobCmd::Retrieve(retrieve) => assert!(!retrieve.force),
+                _ => panic!("expected retrieve command"),
+            },
+            _ => panic!("expected job command"),
+        }
+    }
+
+    #[test]
+    fn job_retrieve_force_sets_true() {
+        let args = Cli::parse_from(["hpc", "job", "retrieve", "12", "output.txt", "--force"]);
+        match args.cmd {
+            Cmd::Job(job) => match job.cmd {
+                JobCmd::Retrieve(retrieve) => assert!(retrieve.force),
+                _ => panic!("expected retrieve command"),
+            },
+            _ => panic!("expected job command"),
+        }
+    }
 }

@@ -309,6 +309,7 @@ pub async fn send_job_retrieve(
     path: &str,
     output: &Option<PathBuf>,
     overwrite: bool,
+    force: bool,
     headless: bool,
 ) -> anyhow::Result<i32> {
     let display_name = Path::new(path)
@@ -338,6 +339,7 @@ pub async fn send_job_retrieve(
                     path: path.to_owned(),
                     local_path: Some(local_path),
                     overwrite,
+                    force,
                 },
             )),
         })

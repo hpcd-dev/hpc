@@ -170,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
                         &args.path,
                         &args.output,
                         args.overwrite,
+                        args.force,
                         args.headless,
                     )
                     .await?;
