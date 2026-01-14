@@ -11,6 +11,8 @@ use proto::stream_event;
 use proto::{MfaAnswer, StreamEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::time::Duration;
 use tonic::Status;
 
@@ -20,6 +22,10 @@ fn parse_squeue_state(output: &str) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(|state| state.to_ascii_uppercase())
+}
+
+fn is_invalid_job_id(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("invalid job id")
 }
 
 #[derive(Clone)]
@@ -59,18 +65,20 @@ impl AgentSvc {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            if let Err(err) = self.check_running_jobs().await {
+            if let Err(err) = self.check_running_jobs(interval).await {
                 log::warn!("job check failed: {err}");
             }
         }
     }
 
-    pub async fn check_running_jobs(&self) -> anyhow::Result<()> {
+    pub async fn check_running_jobs(&self, min_age: Duration) -> anyhow::Result<()> {
         let jobs = self.hosts.list_running_jobs().await?;
         if jobs.is_empty() {
             return Ok(());
         }
         let hosts = self.hosts.list_hosts(None).await?;
+        let min_age = time::Duration::try_from(min_age).unwrap_or(time::Duration::ZERO);
+        let now = OffsetDateTime::now_utc();
 
         let mut host_map = HashMap::new();
         for host in hosts {
@@ -109,6 +117,22 @@ impl AgentSvc {
             }
 
             for job in host_jobs {
+                if min_age > time::Duration::ZERO {
+                    match OffsetDateTime::parse(&job.created_at, &Rfc3339) {
+                        Ok(created_at) => {
+                            if now - created_at < min_age {
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "failed to parse created_at for job {}: {}",
+                                job.id,
+                                e
+                            );
+                        }
+                    }
+                }
                 let Some(job_id) = job.scheduler_id else {
                     log::warn!("job {} has no scheduler id; skipping", job.id);
                     continue;
@@ -124,10 +148,11 @@ impl AgentSvc {
                         }
                     };
                     if code != 0 {
+                        let err_text = String::from_utf8_lossy(&err);
                         log::warn!(
                             "sacct returned {} on {name} for {job_id}: {}",
                             code,
-                            String::from_utf8_lossy(&err)
+                            err_text
                         );
                         continue;
                     }
@@ -206,11 +231,16 @@ impl AgentSvc {
                                     "scontrol returned no job state for {name} job {job_id}"
                                 );
                             } else {
+                                let err_text = String::from_utf8_lossy(&err);
                                 log::warn!(
                                     "scontrol returned {} on {name} for {job_id}: {}",
                                     code,
-                                    String::from_utf8_lossy(&err)
+                                    err_text
                                 );
+                                if is_invalid_job_id(&err_text) {
+                                    completed_ids.push((job.id, None));
+                                    continue;
+                                }
                             }
                         }
                         Err(e) => {
@@ -227,11 +257,15 @@ impl AgentSvc {
                         }
                     };
                     if code != 0 {
+                        let err_text = String::from_utf8_lossy(&err);
                         log::warn!(
                             "squeue returned {} on {name} for {job_id}: {}",
                             code,
-                            String::from_utf8_lossy(&err)
+                            err_text
                         );
+                        if is_invalid_job_id(&err_text) {
+                            completed_ids.push((job.id, None));
+                        }
                         continue;
                     }
                     let output = String::from_utf8_lossy(&out);
