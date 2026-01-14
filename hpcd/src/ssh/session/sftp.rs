@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, anyhow};
 use proto::{MfaAnswer, SubmitStreamEvent};
 use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::{FileAttributes, OpenFlags};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -72,7 +72,19 @@ impl SessionManager {
                     match sftp_session.set_metadata(&cur, attrs).await {
                         Ok(_) => {}
                         Err(e) => {
-                            log::warn!("error when setting metadata for path {}: {}", &cur, e)
+                            if is_permission_denied(&e) {
+                                log::debug!(
+                                    "permission denied when setting metadata for path {}: {}",
+                                    &cur,
+                                    e
+                                );
+                            } else {
+                                log::warn!(
+                                    "error when setting metadata for path {}: {}",
+                                    &cur,
+                                    e
+                                );
+                            }
                         }
                     };
                 }
@@ -518,4 +530,16 @@ async fn ensure_no_dir_overwrite(
         }
     }
     Ok(())
+}
+
+fn is_permission_denied(err: &russh_sftp::client::error::Error) -> bool {
+    match err {
+        russh_sftp::client::error::Error::Status(status) => {
+            status.status_code == StatusCode::PermissionDenied
+        }
+        russh_sftp::client::error::Error::IO(msg) => {
+            msg.to_lowercase().contains("permission denied")
+        }
+        _ => false,
+    }
 }
